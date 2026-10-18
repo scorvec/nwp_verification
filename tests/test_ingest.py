@@ -143,3 +143,55 @@ def test_downloads_retry_a_body_cut_off_mid_transfer(monkeypatch):
     monkeypatch.setattr(H.urllib.request, "urlopen", lambda url, timeout: calls.append(url) or Body(len(calls) == 1))
     monkeypatch.setattr(H.time, "sleep", lambda s: None)
     assert H.get("https://example.invalid/f") == b"whole" and len(calls) == 2
+
+
+def test_earthdata_login_follows_the_data_server_redirect(monkeypatch):
+    import base64
+    import email.message
+    import io
+    import urllib.parse
+    import urllib.request
+    import urllib.response
+
+    from mverify.ingest import http as H
+
+    seen = []
+
+    class Servers(urllib.request.BaseHandler):
+        """GES DISC redirects to Earthdata, which checks the login and sends a code back for a session cookie."""
+        handler_order = 100  # ahead of the real HTTPS handler
+
+        def https_open(self, req):
+            host, auth = urllib.parse.urlsplit(req.full_url).hostname, req.get_header("Authorization")
+            seen.append((host, auth is not None))
+            headers, body, code = email.message.Message(), b"", 200
+            if host == "data.example.gov" and "session=1" in (req.get_header("Cookie") or ""):
+                body = b"precip"
+            elif host == "data.example.gov" and "code=" in req.full_url:  # the server's own login callback
+                code, headers["Location"] = 302, "https://data.example.gov/f.nc4"
+                headers["Set-Cookie"] = "session=1; Path=/"
+            elif host == "data.example.gov":
+                code, headers["Location"] = 302, f"https://{H.EARTHDATA}/oauth/authorize?app=gesdisc"
+            elif auth == "Basic " + base64.b64encode(b"shawn:right").decode():
+                code, headers["Location"] = 302, "https://data.example.gov/login?code=abc"
+            else:
+                code, headers["WWW-Authenticate"] = 401, 'Basic realm="Please enter your Earthdata Login"'
+                body = b"<p>Invalid username or password</p>"
+            r = urllib.response.addinfourl(io.BytesIO(body), headers, req.full_url, code)
+            r.msg = "test"
+            return r
+
+    def opener():
+        o = H.earthdata_opener()
+        o.add_handler(Servers())
+        return o
+
+    monkeypatch.setenv("EARTHDATA_USERNAME", "shawn")
+    monkeypatch.setenv("EARTHDATA_PASSWORD", "right\n")  # pasted secrets end in a newline
+    assert H.get("https://data.example.gov/f.nc4", opener=opener()) == b"precip"
+    assert seen == [("data.example.gov", False), (H.EARTHDATA, True),  # no 401 round trip
+                    ("data.example.gov", False), ("data.example.gov", False)]  # the password stays at Earthdata
+
+    monkeypatch.setenv("EARTHDATA_PASSWORD", "wrong")
+    with pytest.raises(PermissionError, match="Invalid username or password"):
+        H.get("https://data.example.gov/f.nc4", opener=opener())

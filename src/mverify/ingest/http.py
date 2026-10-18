@@ -6,6 +6,7 @@ import http.client
 import http.cookiejar
 import netrc
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -21,7 +22,9 @@ def earthdata_opener() -> urllib.request.OpenerDirector:
     (``machine urs.earthdata.nasa.gov login ... password ...``). The cookie jar keeps
     the session across the redirect back to the data server.
     """
-    user, password = os.environ.get("EARTHDATA_USERNAME"), os.environ.get("EARTHDATA_PASSWORD")
+    # Pasted secrets often carry a trailing newline, which Earthdata rejects as a wrong password.
+    user = (os.environ.get("EARTHDATA_USERNAME") or "").strip()
+    password = (os.environ.get("EARTHDATA_PASSWORD") or "").strip()
     if not (user and password):
         try:
             auth = netrc.netrc().authenticators(EARTHDATA)
@@ -31,8 +34,10 @@ def earthdata_opener() -> urllib.request.OpenerDirector:
             raise PermissionError("NASA Earthdata credentials needed: set EARTHDATA_USERNAME and "
                                   f"EARTHDATA_PASSWORD, or add {EARTHDATA} to ~/.netrc")
         user, password = auth[0], auth[2]
-    pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-    pm.add_password(None, f"https://{EARTHDATA}", user, password)
+    # Sent with the first request to Earthdata rather than after its 401 challenge, which does not
+    # always come back in a form urllib retries.
+    pm = urllib.request.HTTPPasswordMgrWithPriorAuth()
+    pm.add_password(None, f"https://{EARTHDATA}", user, password, is_authenticated=True)
     return urllib.request.build_opener(urllib.request.HTTPBasicAuthHandler(pm),
                                        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
@@ -44,6 +49,13 @@ def get(url: str, retries: int = 3, timeout: int = 120,
             with (opener.open(url, timeout=timeout) if opener else urllib.request.urlopen(url, timeout=timeout)) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
+            if e.code == 401 and opener is not None:
+                # Say why: Earthdata answers a wrong login and an unapproved data application alike.
+                detail = re.sub(r"<[^>]+>|\s+", " ", e.read().decode(errors="replace")).strip()[:300]
+                raise PermissionError(f"NASA Earthdata refused the login for {url} ({detail or e.reason}). "
+                                      "Check the username/password, and that the data centre's application "
+                                      "(e.g. 'NASA GESDISC DATA ARCHIVE') is approved in the Earthdata "
+                                      "profile under Applications > Authorized Apps.") from e
             if e.code == 404 or attempt == retries:
                 raise
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
