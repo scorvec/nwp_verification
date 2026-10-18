@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 G0 = 9.80665
 
 
@@ -31,7 +33,10 @@ class Var:
     grib2: tuple[tuple[int, int, int], ...] = ()  # WMO (discipline, category, number), for messages eccodes cannot name
 
 
-LEVELS = (1000, 925, 850, 700, 500, 300, 250, 200)
+LEVELS = (1000, 925, 850, 700, 500, 400, 300, 250, 200, 150, 100)
+# Radiosonde humidity is unreliable above about 300 hPa (slow, dry-biased sensors in the cold), so
+# specific humidity is verified only below it.
+HUMIDITY_LEVELS = (1000, 925, 850, 700, 500, 400, 300)
 
 # Observation error. sigma_o is the standard deviation of the difference between an
 # observation and the grid-scale truth it is compared with: instrument error plus
@@ -39,19 +44,21 @@ LEVELS = (1000, 925, 850, 700, 500, 300, 250, 200)
 # approximate starting points of the size global data assimilation assigns to these
 # observation types (ECMWF and NCEP observation-error tables), not measured here; they are
 # meant to be replaced by estimates from the database itself (Desroziers et al. 2005).
-SIGMA_O_UPPER = {
-    "z": (5.0, 5.5, 6.0, 7.0, 9.0, 12.0, 13.0, 14.0),     # m
-    "t": (1.2, 1.1, 1.0, 0.9, 0.8, 0.9, 1.0, 1.1),         # K
-    "u": (1.8, 1.8, 1.9, 2.0, 2.2, 2.6, 2.6, 2.5),         # m s-1, each component
-    "v": (1.8, 1.8, 1.9, 2.0, 2.2, 2.6, 2.6, 2.5),
+_SIGMA_O = {
+    "z": (5.0, 5.5, 6.0, 7.0, 9.0, 10.5, 12.0, 13.0, 14.0, 15.5, 17.0),     # m
+    "t": (1.2, 1.1, 1.0, 0.9, 0.8, 0.85, 0.9, 1.0, 1.1, 1.1, 1.2),           # K
+    "u": (1.8, 1.8, 1.9, 2.0, 2.2, 2.4, 2.6, 2.6, 2.5, 2.4, 2.3),           # m s-1, each component
+    "v": (1.8, 1.8, 1.9, 2.0, 2.2, 2.4, 2.6, 2.6, 2.5, 2.4, 2.3),
+    "q": (1.0, 0.9, 0.8, 0.6, 0.35, 0.2, 0.1),                              # g kg-1, HUMIDITY_LEVELS
 }
+SIGMA_O_UPPER = {b: dict(zip(HUMIDITY_LEVELS if b == "q" else LEVELS, s)) for b, s in _SIGMA_O.items()}
 
 
 def _upper(base: str, level: int, label: str, unit: str, grib: tuple[str, ...], std: tuple[str, ...],
            lo: float, hi: float) -> Var:
     return Var(f"{base}{level}", f"{level} hPa {label}", unit, "upper", float(level), grib,
                "isobaricInhPa", std, (f"{base}{level}", f"{base.upper()}{level}"), lo, hi,
-               SIGMA_O_UPPER[base][LEVELS.index(level)])
+               SIGMA_O_UPPER[base][level])
 
 
 SURFACE = [
@@ -107,13 +114,16 @@ UPPER = [
       # Limits sit outside the observed extremes (deep polar lows, subtropical highs); gross errors
       # inside them are left to the hydrostatic check.
       for lv, lo, hi in [(1000, -700, 700), (925, 150, 1300), (850, 700, 1900), (700, 2150, 3500),
-                         (500, 4400, 6200), (300, 7600, 10000), (250, 8800, 11300), (200, 10000, 12800)]),
+                         (500, 4400, 6200), (400, 6000, 8000), (300, 7600, 10000), (250, 8800, 11300),
+                         (200, 10000, 12800), (150, 12300, 14900), (100, 14800, 17300)]),
     *(_upper("t", lv, "temperature", "degC", ("t", "tmp"), ("air_temperature",), -100, 50)
       for lv in LEVELS),
     *(_upper("u", lv, "zonal wind", "m s-1", ("u", "ugrd"), ("eastward_wind",), -120, 120)
       for lv in LEVELS),
     *(_upper("v", lv, "meridional wind", "m s-1", ("v", "vgrd"), ("northward_wind",), -120, 120)
       for lv in LEVELS),
+    *(_upper("q", lv, "specific humidity", "g kg-1", ("q", "spfh"), ("specific_humidity",), 0, 40)
+      for lv in HUMIDITY_LEVELS),
 ]
 
 CATALOG: dict[str, Var] = {v.name: v for v in [*SURFACE, *UPPER, PRECIP]}
@@ -127,7 +137,18 @@ UPPER_ALIASES = {
     "t": ("t", "tmp", "ta", "temp", "temperature", "air_temperature", "air"),
     "u": ("u", "ugrd", "ua", "uwnd", "u_component_of_wind", "eastward_wind"),
     "v": ("v", "vgrd", "va", "vwnd", "v_component_of_wind", "northward_wind"),
+    "q": ("q", "spfh", "hus", "shum", "qv", "specific_humidity"),
 }
+
+
+def specific_humidity(td, p):
+    """Specific humidity in g kg-1 from dew point (degC) and pressure (hPa).
+
+    Vapour pressure over water (Bolton 1980), as radiosonde dew points are reported
+    with respect to water at every temperature (WMO No. 8).
+    """
+    e = 6.112 * np.exp(17.67 * td / (td + 243.5))
+    return 622.0 * e / (p - 0.378 * e)
 
 
 def get(name: str) -> Var:
@@ -165,6 +186,12 @@ def to_canonical(values, unit: str | None, var: Var):
         return values
     if var.unit == "mm":  # kg m-2 is mm of water; ECMWF accumulates in metres
         if u in ("m", "m of water equivalent"):
+            return values * 1000.0
+        return values
+    if var.unit == "g kg-1":  # models write kg kg-1; without a unit, no real g kg-1 field stays below 0.1
+        if u.startswith("g"):
+            return values
+        if "kg" in u or u == "1" or (not u and float(values.max()) < 0.1):
             return values * 1000.0
         return values
     if var.unit == "m s-1":

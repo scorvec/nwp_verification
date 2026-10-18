@@ -22,7 +22,7 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 | truth | variables | scores |
 |---|---|---|
 | surface stations (GHCNh) | 2 m temperature and dew point, sea-level pressure, 10 m wind (u, v, speed, vector) | bias, MAE, RMSE, error SD, correlation |
-| radiosondes | height, temperature and wind at 1000-200 hPa | same, plus vector wind RMSE |
+| radiosondes | height, temperature and wind at 1000-100 hPa, specific humidity at 1000-300 hPa | same, plus vector wind RMSE |
 | ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill |
 | precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE |
 
@@ -39,7 +39,8 @@ mverify inspect FILES...                  what was recognised: variables, inits,
 mverify score [NAME=]FILES... [options]   verify; --out scorecard JSON, --pairs matched pairs (Parquet)
 mverify db status                         rows, stations and time span per variable, QC flag rates
 mverify db ghcnh --year 2026 --bbox conus build or update surface observations
-mverify db soundings                      build or update radiosonde levels
+mverify db soundings                      build or update radiosonde levels (recent, scorvec.com mirror)
+mverify db igra --since 2026-01-01        radiosondes from IGRA2 (NCEI); --archive por for the whole record
 mverify db sensors FILE.csv               load thermometer / anemometer heights
 mverify db precip --start 2026-10-01      add Stage IV and GPCP analyses (GPCP needs EARTHDATA_USERNAME/PASSWORD)
 mverify db init                           create a database, or upgrade an older one

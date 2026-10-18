@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
+import pyarrow.dataset as ds
 
 from mverify import scores, significance
+from mverify import variables as V
 from mverify.db.store import ObsStore
 from mverify.io.open import Forecast, open_forecast
 from mverify.match import MAX_DZ, T_HEIGHT_RANGE, match
@@ -23,6 +28,20 @@ class Result:
 
     def scorecard(self) -> dict:
         return scorecard(self.table, self.inits, self.tests)
+
+    @classmethod
+    def concat(cls, results: Sequence[Result]) -> Result:
+        """One result from several scored on different variables (surface and upper air, say)."""
+        inits: dict[str, set[str]] = {}
+        for r in results:
+            for m, i in r.inits.items():
+                inits.setdefault(m, set()).update(i)
+        frames = [r.table for r in results if not r.table.empty]
+        tests = [r.tests for r in results if not r.tests.empty]
+        return cls(pd.concat([r.pairs for r in results], ignore_index=True),
+                   pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
+                   {m: sorted(i) for m, i in inits.items()},
+                   pd.concat(tests, ignore_index=True) if tests else pd.DataFrame())
 
 
 def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = None,
@@ -76,6 +95,39 @@ def common_sample(pairs: pd.DataFrame) -> pd.DataFrame:
         return pairs
     n = pairs.groupby(SAMPLE_KEY, dropna=False, sort=False)["model"].transform("nunique")
     return pairs[n == pairs["model"].nunique()].reset_index(drop=True)
+
+
+def variable_group(name: str) -> str:
+    """Variables that are scored together: one pressure level (z500, t500, u500, v500, q500), the
+    10 m wind components, or a surface variable on its own."""
+    if name in ("u10", "v10", "ws10"):
+        return "wind10"
+    var = V.CATALOG.get(name)
+    return re.sub(r"^[a-z]+", "", name) if var is not None and var.kind == "upper" else name
+
+
+def score_pair_files(paths: Sequence[str | Path], regions: list[str] | None = None, common: bool = True) -> Result:
+    """Score pairs saved as Parquet (``match`` output, e.g. one file per run), one variable group at a time.
+
+    This is how a sample too large to hold at once is scored, such as every pressure level of
+    many runs: scores and significance tests of one variable never need another's pairs, except
+    the wind components, which ``variable_group`` keeps together. The returned ``pairs`` is empty.
+    """
+    data = ds.dataset([str(p) for p in paths], format="parquet")
+    names = data.to_table(columns=["variable"]).column("variable").unique().to_pylist()
+    groups: dict[str, list[str]] = {}
+    for n in sorted(names):
+        groups.setdefault(variable_group(n), []).append(n)
+    results = []
+    for members in groups.values():
+        pairs = data.to_table(filter=ds.field("variable").isin(members)).to_pandas()
+        if common:
+            pairs = common_sample(pairs)
+        r = score_pairs(pairs, regions)
+        r.inits = {m: sorted(g.dt.strftime("%Y-%m-%dT%H").unique()) for m, g in pairs.groupby("model")["init"]}
+        r.pairs = pairs.iloc[:0]
+        results.append(r)
+    return Result.concat(results)
 
 
 def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list[Forecast] = ()) -> Result:
