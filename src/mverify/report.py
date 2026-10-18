@@ -12,11 +12,14 @@ value at that lead).
       "rows": [{"key": "ghcnh:t2m:conus", "var": "t2m", "label": "2 m temperature",
                 "truth": "surface stations (GHCNh)", "region": "CONUS", "unit": "degC",
                 "scores": {"GFS": {"rmse": [...], "bias": [...], "mae": [...], "n": [...]}},
-                "p": {"IFS|GFS": [...]}}]
+                "p": {"IFS|GFS": [...]}, "runs": {"GFS|IFS": [...]}, "runs_eff": {"GFS|IFS": [...]}}]
     }
 
 ``p`` holds, for each ordered pair of models, the p value per lead of the paired test that
 their mean squared errors differ (``mverify.significance``); it is absent with one model.
+``runs`` and ``runs_eff`` hold, per lead, the runs the test paired and the effective runs it
+counted after allowing for correlated errors on consecutive runs, once per pair of models,
+under the names in alphabetical order ("GFS|IFS").
 """
 
 from __future__ import annotations
@@ -76,8 +79,14 @@ def scorecard(table: pd.DataFrame, inits: dict[str, list[str]], tests: pd.DataFr
         row = {"key": f"{key}:{var}:{region}", "var": var, "label": label, "truth": truth,
                "region": REGION_LABELS.get(region, region), "unit": unit, "scores": scores}
         if (t := by_row.get((net, var, region))) is not None:
-            row["p"] = {f"{a}|{b}": [_clean(v) for v in g.set_index("lead_h")["p"].reindex(leads)]
-                        for (a, b), g in t.groupby(["model", "reference"], sort=True)}
+            pairs = {ab: g.set_index("lead_h").reindex(leads) for ab, g in t.groupby(["model", "reference"])}
+            row["p"] = {f"{a}|{b}": [_clean(v) for v in g["p"]] for (a, b), g in pairs.items()}
+            # the paired runs behind each test and the effective runs it counts, the same for a|b and b|a:
+            # stored once, under the pair in alphabetical order
+            once = {f"{a}|{b}": g for (a, b), g in pairs.items() if a < b}
+            row["runs"] = {k: [None if pd.isna(v) else int(v) for v in g["runs"]] for k, g in once.items()}
+            row["runs_eff"] = {k: [None if pd.isna(v) else round(float(v), 1) for v in g["runs_eff"]]
+                               for k, g in once.items()}
         rows.append(row)
     return {"generated": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"),
             "package": f"mverify {__version__}", "models": sorted(table["model"].unique().tolist()),

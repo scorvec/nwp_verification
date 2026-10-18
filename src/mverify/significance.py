@@ -63,12 +63,13 @@ def paired_test(d: np.ndarray) -> float:
 
 
 def tests(pairs: pd.DataFrame) -> pd.DataFrame:
-    """p values for every ordered pair of models: columns ``BY`` + ``model``, ``reference``, ``runs``, ``p``.
+    """p values for every ordered pair of models: columns ``BY`` + ``model``, ``reference``, ``runs`` (paired
+    runs), ``runs_eff`` (the effective runs the test counts, ``effective_runs``) and ``p``.
 
     ``pairs`` carries a ``region`` column (``scores.assign_regions``) and should be the
     common sample, so that both models of a pair are judged on the same observations.
     """
-    cols = [*BY, "model", "reference", "runs", "p"]
+    cols = [*BY, "model", "reference", "runs", "runs_eff", "p"]
     if pairs.empty or pairs["model"].nunique() < 2:
         return pd.DataFrame(columns=cols)
     mse = (squared_errors(pairs).groupby(["model", *BY, "init"], dropna=False)["se"].mean()
@@ -77,5 +78,6 @@ def tests(pairs: pd.DataFrame) -> pd.DataFrame:
     for a, b in permutations(mse.columns, 2):
         d = (mse[a] - mse[b]).dropna()
         for key, g in d.groupby(level=BY, sort=True):
-            rows.append((*key, a, b, len(g), paired_test(g.to_numpy())))
+            d_run = g.to_numpy()
+            rows.append((*key, a, b, len(g), effective_runs(d_run), paired_test(d_run)))
     return pd.DataFrame(rows, columns=cols)
