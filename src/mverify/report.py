@@ -142,10 +142,11 @@ def precip_maps(maps: dict) -> dict:
         {"product": "stageiv", "truth": ..., "accum_hours": 24, "fdr_q": 0.1, "min_days": 8,
          "groups": [{"label": "days 1-2", "ends_h": [36, 60]}, ...],
          "models": {"GFS": {"lat": [...], "lon": [...], "bias": [[per cell] per group], "rmse": ..., "obs": ...,
-                            "fcst": ..., "days": ..., "significant": ...}}}
+                            "days": ..., "significant": ...}}}
 
     Amounts are tenths of a millimetre per window as integers, cells row by row from the first latitude, None where
-    the cell has no score; ``significant`` is 1 where the bias passes the false-discovery-rate procedure."""
+    the cell has no score (the model's mean is obs + bias); ``significant`` is 1 where the bias passes the
+    false-discovery-rate procedure."""
     first = next(iter(maps.values()))
     out = {"product": first.attrs["product"], "truth": TRUTH.get(first.attrs["product"].upper(), ("", ""))[1],
            "accum_hours": first.attrs["accum_hours"], "fdr_q": first.attrs["fdr_q"],
@@ -160,7 +161,7 @@ def precip_maps(maps: dict) -> dict:
     for model, m in maps.items():
         out["models"][model] = {
             "lat": [round(float(x), 4) for x in m.lat.values], "lon": [round(float(x), 4) for x in m.lon.values],
-            **{k: tenths(m[k].values) for k in ("bias", "rmse", "obs", "fcst")},
+            **{k: tenths(m[k].values) for k in ("bias", "rmse", "obs")},
             "days": [g.ravel().tolist() for g in m["days"].values],
             "significant": [g.ravel().astype(int).tolist() for g in m["significant"].values],
         }
