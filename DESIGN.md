@@ -313,6 +313,11 @@ same cells.
   least 8 days; the p values of all cells of a map go through Benjamini-Hochberg at a false-discovery
   rate of 10 % (`significance.fdr`), so a map shades only the cells whose bias is unlikely to be
   noise.
+* **Gauges** (`pr24`). The 24 h totals stations report (GHCNh `precipitation_24_hour`; US ASOS
+  at 12Z, the window Stage IV uses) are matched like any station variable, with each run's total
+  over the same 24 h built from its accumulations, so they get the same sample rules, scores and
+  paired tests. They check the gridded scores at points; in the US they are not independent of
+  Stage IV, whose analyses take in ASOS gauges, while elsewhere they are the only daily truth.
 * **Latency, and why there are two global products.** Stage IV is final within about a day.
   GPCP V3.3 daily currently ends at 2025-12-31, so it scores the archive; IMERG Late scores the
   recent months. They are kept as separate truths (`GPCP`, `IMERG_LATE` rows) rather than spliced

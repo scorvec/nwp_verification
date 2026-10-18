@@ -30,11 +30,14 @@ Making the two sides comparable:
   * observation error: ``sigma_o`` from the variable catalogue travels with each
     pair for the error-aware scores in mverify.scores.
 
-10 m wind speed is derived from u10/v10 when the model does not provide it.
+10 m wind speed is derived from u10/v10 when the model does not provide it. A gauge's 24 h total (``pr24``) is
+paired with each run's total over the same 24 h, built from the file's precipitation accumulations
+(mverify.precip.accum).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections import defaultdict
 
@@ -45,6 +48,7 @@ from mverify import variables as V
 from mverify.db.store import ObsStore
 from mverify.interp import PointInterpolator
 from mverify.io.open import Field, Forecast
+from mverify.precip.accum import by_run
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +98,8 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
     """
     have = set(fc.variables())
     derivable = {name for name, (parts, _) in V.DERIVED.items() if set(parts) <= have and name not in have}
-    wanted = sorted((have | derivable) - set(V.STATIC) - set(V.GRIDDED))
+    gauges = {V.GAUGE.name} if "tp" in have else set()
+    wanted = sorted((have | derivable | gauges) - set(V.STATIC) - set(V.GRIDDED))
     if variables:
         wanted = [v for v in wanted if v in variables]
     if not wanted or not fc.fields:
@@ -191,6 +196,16 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
         for fs in parts.values():
             if all(c in fs for c in comps):
                 emit(fs[comps[0]], name, lambda fs=fs, fn=fn, comps=comps: fn(*(fs[c].values() for c in comps)))
+    if V.GAUGE.name in wanted:
+        hours = pd.Timedelta(hours=24)
+        ends = sorted(v for var, v in groups if var == V.GAUGE.name)
+        for acc in by_run([f for f in fc.fields if f.var == "tp"]).values():
+            first = next(iter(acc.fields.values()))
+            for end in ends:
+                a, b = end - hours - first.init, end - first.init
+                if a < pd.Timedelta(0) or (total := acc.total(a, b)) is None:
+                    continue
+                emit(dataclasses.replace(first, lead=b), V.GAUGE.name, lambda total=total: total)
     if not out:
         return pd.DataFrame(columns=PAIR_COLUMNS)
     return pd.concat(out, ignore_index=True)
