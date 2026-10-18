@@ -17,7 +17,7 @@ What is detected automatically:
   * grid: regular lat/lon (1-D coordinates, either longitude convention, either
     latitude order) or curvilinear 2-D lat/lon (Lambert, polar stereographic,
     rotated, WRF)
-  * ensemble members, pressure levels in hPa or Pa, model orography
+  * ensemble members, pressure levels in hPa or Pa, model orography, land-sea mask and roughness
 """
 
 from __future__ import annotations
@@ -58,7 +58,9 @@ MODEL_NAMES = ("aifs-ens", "aifs", "ifs-ens", "ifs", "ecmwf", "gefs", "gfs", "hr
 class Grid:
     lat: np.ndarray            # 1-D (regular) or 2-D (curvilinear)
     lon: np.ndarray            # degrees, any convention
-    orog: np.ndarray | None = None
+    orog: np.ndarray | None = None    # model terrain height, m
+    z0: np.ndarray | None = None      # model surface roughness length, m
+    lsm: np.ndarray | None = None     # model land fraction, 0 (water) .. 1 (land)
 
     @property
     def regular(self) -> bool:
@@ -68,6 +70,35 @@ class Grid:
     def key(self) -> tuple:
         return (self.lat.shape, self.lon.shape, float(self.lat.flat[0]), float(self.lat.flat[-1]),
                 float(self.lon.flat[0]), float(self.lon.flat[-1]))
+
+
+class _MemberStack:
+    """All members of one variable at one init and lead, read from storage together.
+
+    Ensemble files usually store the members of a time step in one chunk (or one
+    GRIB message group), so reading member by member reads that chunk once per
+    member. Fields of one stack share it: the first ``values()`` call loads the
+    whole stack, and only the KEEP most recently used stacks stay in memory (two,
+    so u and v can be read in step to derive wind speed).
+    """
+
+    KEEP = 2
+    _loaded: list[_MemberStack] = []  # noqa: RUF012 - shared by design, most recent last
+
+    def __init__(self, da: xr.DataArray):
+        self.da = da  # (member, y, x), lazy
+        self._data: np.ndarray | None = None
+
+    def member(self, k: int) -> np.ndarray:
+        loaded = _MemberStack._loaded
+        if self._data is None:
+            self._data = np.asarray(self.da.values)
+            while len(loaded) >= self.KEEP:
+                loaded.pop(0)._data = None
+        else:
+            loaded.remove(self)
+        loaded.append(self)
+        return self._data[k]
 
 
 @dataclass
@@ -80,6 +111,8 @@ class Field:
     _da: xr.DataArray = field(repr=False)
     _unit: str | None = field(default=None, repr=False)
     source: str = ""
+    _stack: tuple[_MemberStack, int] | None = field(default=None, repr=False)  # (stack, position in it)
+    accum: tuple[pd.Timedelta, pd.Timedelta] | None = None  # (start, end) lead of an accumulation
 
     @property
     def valid(self) -> pd.Timestamp:
@@ -90,7 +123,8 @@ class Field:
         return self.lead / pd.Timedelta("1h")
 
     def values(self) -> np.ndarray:
-        a = np.asarray(self._da.values, dtype="float64")
+        a = self._stack[0].member(self._stack[1]) if self._stack else self._da.values
+        a = np.asarray(a, dtype="float64")
         return np.asarray(V.to_canonical(a, self._unit, V.CATALOG[self.var]))
 
 
@@ -151,13 +185,42 @@ def _open(path: Path, fmt: str) -> list[xr.Dataset]:
         warnings.simplefilter("ignore")
         if fmt == "grib":
             import cfgrib
-            return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
+            starts, instant = _accumulation_starts(path)
+            if len(starts) <= 1:
+                return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": "", "read_keys": ["startStep"]})
+            # Several accumulations of one field (GFS: 0-30 h and 24-30 h) collide in cfgrib, which
+            # keeps one silently; open each start separately and everything else once.
+            out = list(cfgrib.open_datasets(str(path), backend_kwargs={
+                "indexpath": "", "filter_by_keys": {"stepType": "instant"}})) if instant else []
+            for s in starts:
+                out += cfgrib.open_datasets(str(path), backend_kwargs={
+                    "indexpath": "", "read_keys": ["startStep"],
+                    "filter_by_keys": {"stepType": "accum", "startStep": s}})
+            return [ds for ds in out if ds.data_vars]
         if fmt == "netcdf":
             try:
                 return [xr.open_dataset(path, decode_timedelta=True)]
             except ValueError:
                 return [xr.open_dataset(path, decode_times=False)]
         return [xr.open_zarr(path, consolidated=None, decode_timedelta=True)]
+
+
+def _accumulation_starts(path: Path) -> tuple[list[int], bool]:
+    """Distinct startStep values of the accumulated messages in a GRIB file, and whether it holds
+    any instantaneous message (headers only)."""
+    import eccodes
+    starts: set[int] = set()
+    instant = False
+    with open(path, "rb") as fh:
+        while (gid := eccodes.codes_grib_new_from_file(fh)) is not None:
+            try:
+                if eccodes.codes_get(gid, "stepType") == "accum":
+                    starts.add(int(eccodes.codes_get(gid, "startStep")))
+                else:
+                    instant = True
+            finally:
+                eccodes.codes_release(gid)
+    return sorted(starts), instant
 
 
 # --------------------------------------------------------------------------- coordinates
@@ -238,6 +301,10 @@ def _times(ds: xr.Dataset, is_grib: bool, path: Path, init_hint):
         vt = None
     if i and ld:
         return i, ld, None, None, "init+lead"
+    if ld and vt and vt != "valid_time" and vt in ds.dims and ld in ds.dims:
+        # A generic time dimension next to a lead dimension is the init (cfgrib written to
+        # netCDF/Zarr, WeatherBench2's time + prediction_timedelta).
+        return vt, ld, None, None, "init+lead"
     if i and vt:
         return i, vt, None, None, "init+valid"
     if vt:
@@ -298,7 +365,7 @@ def identify(name: str, da: xr.DataArray, has_level: bool) -> str | None:
         return m
     if tol == "surface" and (short in ("orog", "z", "hgt", "gh") or low in ("orog", "z", "hgt")):
         return "orog"
-    for v in V.SURFACE:
+    for v in (*V.SURFACE, V.PRECIP):
         if v.name == "orog":
             if low in (a.lower() for a in v.aliases if a not in ("HGT",)) or std in v.standard_names:
                 return "orog"
@@ -308,7 +375,7 @@ def identify(name: str, da: xr.DataArray, has_level: bool) -> str | None:
     if std:
         hag = da.coords.get("heightAboveGround", da.coords.get("height"))
         h = float(np.atleast_1d(hag.values)[0]) if hag is not None else None
-        for v in V.SURFACE:
+        for v in (*V.SURFACE, V.PRECIP):
             if std in v.standard_names and v.name != "orog":
                 if v.name in ("t2m", "td2m") and h not in (None, 2.0):
                     continue
@@ -331,8 +398,8 @@ def _embedded_level(name: str) -> tuple[str, float] | None:
 
 # --------------------------------------------------------------------------- main entry
 
-def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, orog: dict) -> list[Field]:
-    """Fields of one dataset; orography found on the way is stored in ``orog`` by grid key."""
+def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, static: dict) -> list[Field]:
+    """Fields of one dataset; static fields (``V.STATIC``) found on the way go in ``static[grid.key][name]``."""
     is_grib = any("GRIB_shortName" in ds[v].attrs for v in ds.data_vars)
     grid, (ydim, xdim) = _grid(ds)
     idim, ldim, init_c, lead_c, mode = _times(ds, is_grib, path, init_hint)
@@ -364,28 +431,49 @@ def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, orog: dict) -
                 found.append((vname, da.isel({ldim_v: k}) if ldim_v else da))
     fields: list[Field] = []
     for vname, da in found:
-        if vname == "orog":
+        if vname in V.STATIC:
             o = da
             for d in [d for d in o.dims if d not in (ydim, xdim)]:
                 o = o.isel({d: 0})
-            orog[grid.key] = V.to_canonical(np.asarray(o.values, float), o.attrs.get("units"),
-                                            V.CATALOG["orog"])
+            static.setdefault(grid.key, {})[vname] = V.to_canonical(
+                np.asarray(o.transpose(ydim, xdim).values, float), o.attrs.get("units"), V.CATALOG[vname])
             continue
         unit = da.attrs.get("units")
-        other = [d for d in da.dims if d not in (ydim, xdim)]
+        stacked = mdim is not None and mdim in da.dims
+        other = [d for d in da.dims if d not in (ydim, xdim) and not (stacked and d == mdim)]
         sizes = [da.sizes[d] for d in other]
         for idx in np.ndindex(*sizes) if sizes else [()]:
             sel = dict(zip(other, idx))
             sub = da.isel(sel) if sel else da
-            init, lead = _field_time(sub, mode, idim, ldim, init_c, lead_c)
+            if not stacked:
+                init, lead = _field_time(sub, mode, idim, ldim, init_c, lead_c)
+                if init is not None:
+                    fields.append(Field(vname, init, lead, None, grid, sub.transpose(ydim, xdim), unit,
+                                        source=f"{path.name}:{fmt}", accum=_accum(vname, sub, lead)))
+                continue
+            init, lead = _field_time(sub.isel({mdim: 0}), mode, idim, ldim, init_c, lead_c)
             if init is None:
                 continue
-            member = None
-            if mdim and mdim in sub.coords and (mdim in da.dims):
-                member = int(sub[mdim].values)
-            fields.append(Field(vname, init, lead, member, grid, sub.transpose(ydim, xdim), unit,
-                                source=f"{path.name}:{fmt}"))
+            stack = _MemberStack(sub.transpose(mdim, ydim, xdim))
+            for k in range(sub.sizes[mdim]):
+                m = sub.isel({mdim: k})
+                fields.append(Field(vname, init, lead, int(m[mdim].values) if mdim in m.coords else k, grid,
+                                    m.transpose(ydim, xdim), unit, source=f"{path.name}:{fmt}", _stack=(stack, k),
+                                    accum=_accum(vname, m, lead)))
     return fields
+
+
+def _accum(vname: str, da: xr.DataArray, lead: pd.Timedelta) -> tuple[pd.Timedelta, pd.Timedelta] | None:
+    """Lead-time window of an accumulated field: GRIB startStep when known, else since the init.
+
+    netCDF/Zarr files rarely say; a running total from the start of the forecast is the
+    convention of ECMWF, ERA5, GFS converted with wgrib2 -netcdf and most model output.
+    """
+    if vname not in V.GRIDDED:
+        return None
+    start = da.attrs.get("GRIB_startStep")
+    unit = {0: "min", 1: "h", 2: "D", 10: "3h", 11: "6h", 12: "12h", 13: "s"}.get(da.attrs.get("GRIB_stepUnits", 1), "h")
+    return (pd.Timedelta(0) if start is None else pd.Timedelta(int(start) * pd.Timedelta(f"1{unit}")), lead)
 
 
 def _field_time(sub: xr.DataArray, mode, idim, ldim, init_c, lead_c):
@@ -427,16 +515,21 @@ def open_forecast(paths, name: str | None = None, init=None) -> Forecast:
     if not files:
         raise FileNotFoundError(f"nothing matched {paths}")
     fields: list[Field] = []
-    orog: dict[tuple, np.ndarray] = {}
+    static: dict[tuple, dict[str, np.ndarray]] = {}
     for f in files:
         fmt = detect_format(f)
         for ds in _open(f, fmt):
             try:
-                fields += _iter_dataset(ds, f, init, fmt, orog)
+                fields += _iter_dataset(ds, f, init, fmt, static)
             except ValueError as e:
                 log.warning("%s: skipped a dataset (%s)", f, e)
-    # Orography found in any file applies to every field on the same grid.
+    # Static fields found in any file apply to every field on the same grid.
     for f in fields:
-        if f.grid.orog is None and f.grid.key in orog:
-            f.grid.orog = orog[f.grid.key]
+        found = static.get(f.grid.key, {})
+        if f.grid.orog is None:
+            f.grid.orog = found.get("orog")
+        if f.grid.z0 is None:
+            f.grid.z0 = found.get("fsr")
+        if f.grid.lsm is None:
+            f.grid.lsm = found.get("lsm")
     return Forecast(name or guess_model_name(files), fields)

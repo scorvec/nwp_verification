@@ -9,6 +9,20 @@ interpolated linearly in log-pressure between levels no more than 60 hPa
 apart (winds only from an exact level or levels 25 hPa apart). The vertical
 hydrostatic check in mverify.db.qc then flags inconsistent heights.
 
+Balloon drift. A sonde reaches 200 hPa some 40 minutes after launch and up to
+100-200 km downwind in a jet, so every level is stored with where and when it
+was measured (obs.lat, obs.lon, obs.dt_min relative to the nominal hour), and
+matching interpolates the model to that point instead of the launch site:
+  * time: the per-level timestamps when the ascent carries them (WIS2 BUFR and
+    ECCC do, about 80% of the mirror); otherwise launch is assumed
+    LAUNCH_LEAD_MIN before the nominal hour and the balloon rises at
+    ASCENT_RATE, the WMO standard practice values;
+  * position: the per-level positions when they vary within the ascent (GPS
+    sondes in BUFR); otherwise the reported winds are integrated over time
+    from the launch site.
+The time offset is stored but not yet used: the model is taken at the nominal
+hour, as in most operational verification.
+
 IGRA2 (NCEI) is the long archive for the same stations; its parser plugs in
 the same way once NCEI is reachable from the build machine.
 """
@@ -35,7 +49,17 @@ MIRROR = "https://raw.githubusercontent.com/scorvec/scorvec.github.io/skewt-data
 SOURCE = "raob:scorvec-skewt"
 LEVELS = (1000, 925, 850, 700, 500, 300, 250, 200)
 COLS = {"pressure_hPa": "p", "geopotential height_m": "z", "temperature_C": "t",
-        "wind direction_degree": "wd", "wind speed_m/s": "ws"}
+        "wind direction_degree": "wd", "wind speed_m/s": "ws", "time": "time", "latitude": "lat",
+        "longitude": "lon"}
+NUMERIC = ("p", "z", "t", "wd", "ws", "lat", "lon")
+
+ASCENT_RATE = 5.0         # m s-1, typical rise rate of a radiosonde balloon
+LAUNCH_LEAD_MIN = 45.0    # launch this many minutes before the nominal hour (WMO practice)
+MAX_DT_MIN = 180          # per-level times further than this from the nominal hour are not trusted
+EARTH_RADIUS = 6.371e6    # m
+# An ascent never changes once mirrored, so its ingest_log version is the version of the reduction
+# below; bumping it makes the next update re-derive every ascent (2: balloon drift).
+REDUCTION_VERSION = "2"
 
 
 def _read(root: str, rel: str) -> bytes:
@@ -61,25 +85,88 @@ def _at_level(p: np.ndarray, x: np.ndarray, lev: float, max_gap: float) -> float
     return float(x[i0] + w * (x[i1] - x[i0]))
 
 
-def mandatory_levels(prof: pd.DataFrame) -> dict[str, float]:
-    """Canonical {z500: m, t850: degC, u250: m/s, ...} for one ascent."""
-    prof = prof.rename(columns=COLS).reindex(columns=list(COLS.values())).apply(pd.to_numeric, errors="coerce")
-    prof = prof.dropna(subset=["p"]).sort_values("p", ascending=False).drop_duplicates("p")
+def _fill(x: np.ndarray, at: np.ndarray) -> np.ndarray | None:
+    """``x`` with gaps filled by linear interpolation along ``at`` (held constant past the ends)."""
+    ok = np.isfinite(x) & np.isfinite(at)
+    if not ok.any():
+        return None
+    order = np.argsort(at[ok], kind="stable")  # np.interp needs ascending abscissae
+    return np.interp(at, at[ok][order], x[ok][order])
+
+
+def flight_time(prof: pd.DataFrame, hour: pd.Timestamp | None) -> np.ndarray | None:
+    """Seconds from the nominal hour at which each row (sorted by falling pressure) was measured."""
+    if hour is not None and prof["time"].notna().sum() >= 2:
+        s = (pd.to_datetime(prof["time"], errors="coerce") - hour).dt.total_seconds().to_numpy(float)
+        ok = np.isfinite(s)
+        # Some feeds stamp every level with the launch or nominal time; such a column is not a
+        # flight time. Real per-level times rise on most steps and span the ascent.
+        rising = np.mean(np.diff(s[ok]) > 0) >= 0.5 if ok.sum() >= 2 else False
+        if rising and np.ptp(s[ok]) >= 600 and np.all(np.abs(s[ok]) <= MAX_DT_MIN * 60):
+            # Feeds occasionally repeat or reorder a timestamp; time cannot run backwards up the ascent.
+            return np.fmax.accumulate(_fill(s, np.arange(len(s), dtype=float)))
+    z = _fill(prof["z"].to_numpy(float), np.log(prof["p"].to_numpy(float)))
+    if z is None:
+        return None
+    return -LAUNCH_LEAD_MIN * 60 + (z - z[0]) / ASCENT_RATE
+
+
+def trajectory(prof: pd.DataFrame, t: np.ndarray, u: np.ndarray, v: np.ndarray,
+               lat0: float, lon0: float) -> tuple[np.ndarray, np.ndarray] | None:
+    """Latitude and longitude of each row: reported positions when they vary, else winds integrated over ``t``."""
+    lat, lon = prof["lat"].to_numpy(float), prof["lon"].to_numpy(float)
+    if np.isfinite(lat).sum() >= 2 and (np.nanmax(lat) - np.nanmin(lat) > 1e-4 or np.nanmax(lon) - np.nanmin(lon) > 1e-4):
+        lat, lon = _fill(lat, t), _fill(lon, t)
+        return lat, ((lon + 180) % 360) - 180
+    u, v = _fill(u, t), _fill(v, t)
+    if u is None or v is None:
+        return None
+    dt = np.diff(t, prepend=t[0])
+    north = np.cumsum(0.5 * (v + np.roll(v, 1)) * dt * (dt > 0))   # trapezoid; first step is zero
+    east = 0.5 * (u + np.roll(u, 1)) * dt * (dt > 0)
+    lat = lat0 + np.rad2deg(north / EARTH_RADIUS)
+    lon = lon0 + np.rad2deg(np.cumsum(east / (EARTH_RADIUS * np.cos(np.deg2rad(lat)))))
+    return lat, ((lon + 180) % 360) - 180
+
+
+def mandatory_levels(prof: pd.DataFrame, hour: pd.Timestamp | None = None,
+                     lat0: float | None = None, lon0: float | None = None) -> pd.DataFrame:
+    """One ascent at the mandatory levels: index ``variable`` (z500, t850, u250 ...), columns
+    ``value`` (canonical unit) and, where the flight could be reconstructed, ``dt_min``, ``lat``, ``lon``."""
+    prof = prof.rename(columns=COLS).reindex(columns=list(COLS.values()))
+    for c in NUMERIC:
+        prof[c] = pd.to_numeric(prof[c], errors="coerce")
+    prof = prof.dropna(subset=["p"]).sort_values("p", ascending=False, kind="stable").drop_duplicates("p")
     p = prof["p"].to_numpy(float)
     rad = np.deg2rad(prof["wd"].to_numpy(float))
     ws = prof["ws"].to_numpy(float)
-    series = {"z": (prof["z"].to_numpy(float), 60), "t": (prof["t"].to_numpy(float), 60),
-              "u": (-ws * np.sin(rad), 25), "v": (-ws * np.cos(rad), 25)}
-    out: dict[str, float] = {}
+    u, v = -ws * np.sin(rad), -ws * np.cos(rad)
+    series = {"z": (prof["z"].to_numpy(float), 60), "t": (prof["t"].to_numpy(float), 60), "u": (u, 25), "v": (v, 25)}
+
+    t = flight_time(prof, hour) if len(p) else None
+    path = trajectory(prof, t, u, v, lat0, lon0) if t is not None and lat0 is not None else None
+    rows = []
     for lev in LEVELS:
+        where = {"dt_min": np.nan, "lat": np.nan, "lon": np.nan}
+        if t is not None and len(p) and p[-1] <= lev <= p[0]:
+            lp = np.log(p[::-1])  # ascending, as np.interp needs
+            where["dt_min"] = np.interp(np.log(lev), lp, t[::-1]) / 60
+            if path is not None:
+                where["lat"] = np.interp(np.log(lev), lp, path[0][::-1])
+                # Longitude through the sine/cosine, so a path across the dateline interpolates correctly.
+                rl = np.deg2rad(path[1][::-1])
+                where["lon"] = np.rad2deg(np.arctan2(np.interp(np.log(lev), lp, np.sin(rl)),
+                                                     np.interp(np.log(lev), lp, np.cos(rl))))
         for var, (x, gap) in series.items():
             val = _at_level(p, x, lev, gap)
             if val is not None:
-                out[f"{var}{lev}"] = val
+                rows.append({"variable": f"{var}{lev}", "value": val, **where})
+    out = pd.DataFrame(rows, columns=["variable", "value", "dt_min", "lat", "lon"]).set_index("variable")
+    out["dt_min"] = out["dt_min"].round().clip(-MAX_DT_MIN, MAX_DT_MIN)
     return out
 
 
-def _one(root: str, sid: str, hour: pd.Timestamp) -> tuple[dict[str, float], float | None] | None:
+def _one(root: str, sid: str, hour: pd.Timestamp, lat: float, lon: float) -> tuple[pd.DataFrame, float | None] | None:
     rel = f"soundings/{sid}_{hour:%Y%m%d%H}.csv"
     try:
         prof = pd.read_csv(io.BytesIO(_read(root, rel)))
@@ -87,7 +174,7 @@ def _one(root: str, sid: str, hour: pd.Timestamp) -> tuple[dict[str, float], flo
         log.debug("skipping %s: %s", rel, e)
         return None
     z = pd.to_numeric(prof.get("geopotential height_m"), errors="coerce").dropna()
-    return mandatory_levels(prof), (float(z.iloc[0]) if len(z) else None)
+    return mandatory_levels(prof, hour, lat, lon), (float(z.iloc[0]) if len(z) else None)
 
 
 MAX_POSITION_ERROR_DEG = 1.0
@@ -126,6 +213,7 @@ def ingest(store: ObsStore, root: str = MIRROR, since=None, bbox=None, workers: 
     if reference is None:
         reference = reference_positions(db_path().parent / "cache")
     man = json.loads(_read(root, "manifest.json"))
+    done = store.ingested_versions(SOURCE)
     jobs = []
     for sid, e in sorted(man["entries"].items()):
         if not position_confirmed(sid, e["la"], e["lo"], reference):
@@ -138,14 +226,14 @@ def ingest(store: ObsStore, root: str = MIRROR, since=None, bbox=None, workers: 
             hour = pd.Timestamp(h)
             if since is not None and hour < pd.Timestamp(since):
                 continue
-            if store.ingested_version(SOURCE, f"{sid}/{hour:%Y%m%d%H}") is None:
+            if done.get(f"{sid}/{hour:%Y%m%d%H}") != REDUCTION_VERSION:
                 jobs.append((sid, hour, e))
     progress(f"soundings: {len(jobs)} new ascents")
     total = 0
     with ThreadPoolExecutor(workers) as ex:
         for k in range(0, len(jobs), batch_size):
             chunk = jobs[k:k + batch_size]
-            results = list(ex.map(lambda j: _one(root, j[0], j[1]), chunk))
+            results = list(ex.map(lambda j: _one(root, j[0], j[1], j[2]["la"], j[2]["lo"]), chunk))
             total += _write_batch(store, chunk, results)
     return total
 
@@ -160,10 +248,10 @@ def _write_batch(store: ObsStore, chunk, results) -> int:
         key = f"{sid}/{hour:%Y%m%d%H}"
         stations[sid] = {"station_id": f"RAOB:{sid}", "network": "RAOB", "name": e.get("n"),
                          "lat": e["la"], "lon": e["lo"], "elev_m": z0, "wmo_id": sid}
-        obs = pd.DataFrame({"station_id": f"RAOB:{sid}", "valid_time": hour, "variable": list(levels),
-                            "value": list(levels.values()), "qc": 0, "dt_min": 0, "source": SOURCE, "_object": key})
+        obs = levels.reset_index().assign(station_id=f"RAOB:{sid}", valid_time=hour, qc=0, source=SOURCE,
+                                          _object=key)
         frames.append(qc.run_sounding_levels(obs[obs["variable"].isin(list(V.CATALOG))]))
-        objects.append((key, "1", len(levels)))  # an ascent never changes once mirrored: its key is its version
+        objects.append((key, REDUCTION_VERSION, len(levels)))
     if not objects:
         return 0
     try:

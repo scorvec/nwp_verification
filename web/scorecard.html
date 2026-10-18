@@ -42,7 +42,17 @@
 </main>
 <script>
 const COLORS = ["--s1", "--s2", "--s3", "--s4", "--s5"].map(v => getComputedStyle(document.documentElement).getPropertyValue(v).trim());
-const NAMES = { rmse: "RMSE", bias: "Bias (forecast − observed)", mae: "MAE", corr: "Correlation", crps: "CRPS", spread: "Spread", ssr: "Spread/skill", n: "Pairs" };
+const NAMES = {
+  rmse: "RMSE", rmse_oc: "RMSE, observation error removed", bias: "Bias (forecast − observed)", mae: "MAE",
+  corr: "Correlation", crps: "CRPS", crps_oe: "CRPS, observation error included", spread: "Spread",
+  spread_oe: "Spread incl. observation error", ssr: "Spread/skill", ssr_oe: "Spread/skill incl. observation error",
+  ets: "Equitable threat score", fbias: "Frequency bias", pod: "Probability of detection", far: "False alarm ratio",
+  fss_50km: "FSS, 50 km", fss_100km: "FSS, 100 km", fss_200km: "FSS, 200 km", fss_400km: "FSS, 400 km",
+  fcst_mean: "Mean forecast", obs_mean: "Mean analysed", base_rate: "Analysed frequency",
+  n: "Pairs / cases",
+};
+const UNITLESS = new Set(["corr", "ssr", "ssr_oe", "n", "ets", "fbias", "pod", "far", "fss_50km", "fss_100km",
+                          "fss_200km", "fss_400km", "base_rate"]);
 const src = new URLSearchParams(location.search).get("src") || "scores.json";
 const $ = id => document.getElementById(id);
 
@@ -82,7 +92,7 @@ function draw(card) {
     const svg = chart(r, card, stat);
     if (!svg) return "";
     const legend = Object.keys(r.scores).map((m, i) => `<span><i style="background:${COLORS[i % COLORS.length]}"></i>${m}</span>`).join("");
-    return `<div class="card"><h2>${r.label}</h2><div class="sub">${NAMES[stat]}${stat === "corr" || stat === "ssr" || stat === "n" ? "" : " (" + r.unit + ")"}</div>${svg}<div class="legend">${legend}</div></div>`;
+    return `<div class="card"><h2>${r.label}</h2><div class="sub">${NAMES[stat]}${UNITLESS.has(stat) ? "" : " (" + r.unit + ")"}</div>${svg}<div class="legend">${legend}</div></div>`;
   }).join("") || "<p>No scores for this selection.</p>";
 }
 

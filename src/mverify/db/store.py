@@ -15,6 +15,8 @@ an object is either fully ingested and logged, or not at all.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from importlib import resources
@@ -23,15 +25,18 @@ from pathlib import Path
 import duckdb
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from mverify import variables as V
-from mverify.db import qc
+from mverify.db import migrations, qc
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PATH = Path.home() / ".cache" / "mverify" / "obs.duckdb"
 
-OBS_COLUMNS = ("station_id", "valid_time", "variable", "value", "qc", "dt_min", "source")
-STATION_COLUMNS = ("station_id", "network", "name", "lat", "lon", "elev_m", "wmo_id", "icao", "country")
+OBS_COLUMNS = ("station_id", "valid_time", "variable", "value", "qc", "dt_min", "lat", "lon", "source")
+STATION_COLUMNS = ("station_id", "network", "name", "lat", "lon", "elev_m", "t_height_m", "wind_height_m",
+                   "wmo_id", "icao", "country")
+MAX_DT_MIN = 180  # observation time may differ from valid_time by this much (balloon flight time)
 
 
 class SchemaError(RuntimeError):
@@ -51,6 +56,11 @@ def db_path(path: str | os.PathLike | None = None) -> Path:
     return Path(path or os.environ.get("MVERIFY_DB") or DEFAULT_PATH).expanduser()
 
 
+def _grid_root(db: Path) -> str:
+    """Gridded analyses of ``obs.duckdb`` live in ``obs_grids/`` next to it."""
+    return str(db.parent / f"{db.stem}_grids")
+
+
 # --------------------------------------------------------------------------- validation
 
 def _fail(what: str, df: pd.DataFrame, mask) -> None:
@@ -65,7 +75,7 @@ def validate_stations(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValidationError(f"stations batch lacks columns {sorted(missing)}")
     out = df.reindex(columns=list(STATION_COLUMNS)).copy()
-    for c in ("lat", "lon", "elev_m"):
+    for c in ("lat", "lon", "elev_m", "t_height_m", "wind_height_m"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
     for c in ("station_id", "network", "name", "wmo_id", "icao", "country"):
         out[c] = out[c].astype("string").str.strip().replace("", pd.NA)
@@ -76,6 +86,10 @@ def validate_stations(df: pd.DataFrame) -> pd.DataFrame:
            for s, n in zip(out["station_id"], out["network"])])
     _fail("have latitude outside -90..90 or missing", out, ~out["lat"].between(-90, 90))
     _fail("have elevation outside -500..9000 m", out, out["elev_m"].notna() & ~out["elev_m"].between(-500, 9000))
+    _fail("have a thermometer height outside 0.5..30 m", out,
+          out["t_height_m"].notna() & ~out["t_height_m"].between(0.5, 30))
+    _fail("have an anemometer height outside 1..100 m", out,
+          out["wind_height_m"].notna() & ~out["wind_height_m"].between(1, 100))
     _fail("repeat a station_id within the batch", out, out["station_id"].duplicated(keep=False))
     return out
 
@@ -91,10 +105,15 @@ def validate_obs(df: pd.DataFrame) -> pd.DataFrame:
     out["value"] = pd.to_numeric(out["value"], errors="coerce")
     out["qc"] = out["qc"].fillna(0).astype("uint16")
     out["dt_min"] = out["dt_min"].fillna(0).astype("int16")
+    for c in ("lat", "lon"):
+        out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
+    out["lon"] = ((out["lon"] + 180.0) % 360.0) - 180.0
     _fail("name a variable outside the catalogue", out, ~out["variable"].isin(list(V.CATALOG)))
     _fail("have a non-finite value", out, ~np.isfinite(out["value"].to_numpy(float)))
     _fail("have a valid_time that is not a whole hour", out, out["valid_time"] != out["valid_time"].dt.floor("h"))
-    _fail("have dt_min outside -59..59", out, ~out["dt_min"].between(-59, 59))
+    _fail(f"have dt_min outside -{MAX_DT_MIN}..{MAX_DT_MIN}", out, ~out["dt_min"].between(-MAX_DT_MIN, MAX_DT_MIN))
+    _fail("have only one of lat/lon", out, out["lat"].isna() != out["lon"].isna())
+    _fail("have latitude outside -90..90", out, out["lat"].notna() & ~out["lat"].between(-90, 90))
     _fail("have no source", out, out["source"].isna())
     known = sum(qc.FLAGS)
     _fail("carry qc bits not defined in mverify.db.qc", out, (out["qc"].to_numpy() & ~np.uint16(known)) != 0)
@@ -106,9 +125,12 @@ def validate_obs(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------- the store
 
 class ObsStore:
-    def __init__(self, con: duckdb.DuckDBPyConnection, read_only: bool = False):
+    def __init__(self, con: duckdb.DuckDBPyConnection, read_only: bool = False, grid_root: str | None = None):
         self.con = con
         self.read_only = read_only
+        # Gridded analyses live as Zarr stores under grid_root; the grids table holds paths relative to it.
+        self.grid_root = grid_root
+        self._temporary_grids = False
 
     # ---- opening
 
@@ -118,17 +140,18 @@ class ObsStore:
         if read_only:
             if not p.exists():
                 raise FileNotFoundError(f"no observation database at {p}; run `mverify db init` first")
-            store = cls(duckdb.connect(str(p), read_only=True), read_only=True)
+            store = cls(duckdb.connect(str(p), read_only=True), read_only=True, grid_root=_grid_root(p))
             store._check_version()
             return store
         p.parent.mkdir(parents=True, exist_ok=True)
-        store = cls(duckdb.connect(str(p)))
+        store = cls(duckdb.connect(str(p)), grid_root=_grid_root(p))
         store._create()
         return store
 
     @classmethod
     def memory(cls) -> ObsStore:
-        store = cls(duckdb.connect(":memory:"))
+        store = cls(duckdb.connect(":memory:"), grid_root=tempfile.mkdtemp(prefix="mverify-grids-"))
+        store._temporary_grids = True
         store._create()
         return store
 
@@ -136,9 +159,10 @@ class ObsStore:
     def snapshot(cls, root: str) -> ObsStore:
         """Read-only views over a published snapshot (local directory or https:// / s3:// URL).
 
-        Layout: ``{root}/stations.parquet``, ``{root}/variables.parquet`` and
-        ``{root}/obs/variable=*/year=*/month=*/*.parquet``. Hive partitioning means
-        a query reads only the variables and months it touches.
+        Layout: ``{root}/stations.parquet``, ``{root}/variables.parquet``,
+        ``{root}/obs/variable=*/year=*/month=*/*.parquet``, and for gridded analyses
+        ``{root}/grids.parquet`` plus the Zarr stores under ``{root}/grids/``. Hive
+        partitioning means a query reads only the variables and months it touches.
         """
         con = duckdb.connect(":memory:")
         if root.startswith(("http://", "https://", "s3://")):
@@ -147,10 +171,18 @@ class ObsStore:
             con.execute(f"CREATE VIEW {t} AS SELECT * FROM read_parquet({_lit(f'{root}/{t}.parquet')})")
         con.execute("CREATE VIEW obs AS SELECT * EXCLUDE (year, month) FROM "
                     f"read_parquet({_lit(f'{root}/obs/*/*/*/*.parquet')}, hive_partitioning = true)")
-        return cls(con, read_only=True)
+        try:
+            con.execute(f"CREATE VIEW grids AS SELECT * FROM read_parquet({_lit(f'{root}/grids.parquet')})")
+        except duckdb.Error:  # a snapshot without gridded analyses
+            con.execute("CREATE VIEW grids AS SELECT NULL::VARCHAR AS product, NULL::VARCHAR AS variable, "
+                        "NULL::SMALLINT AS accum_hours, NULL::TIMESTAMP AS valid_time, NULL::VARCHAR AS uri "
+                        "WHERE false")
+        return cls(con, read_only=True, grid_root=f"{root}/grids")
 
     def close(self) -> None:
         self.con.close()
+        if self._temporary_grids:
+            shutil.rmtree(self.grid_root, ignore_errors=True)
 
     def __enter__(self):
         return self
@@ -160,15 +192,20 @@ class ObsStore:
 
     def _create(self) -> None:
         version = self._version()
-        if version is not None and version != SCHEMA_VERSION:
-            raise SchemaError(f"database has schema v{version}, this mverify writes v{SCHEMA_VERSION}")
-        self.con.execute(resources.files("mverify.db").joinpath("schema.sql").read_text())
+        if version is not None and version > SCHEMA_VERSION:
+            raise SchemaError(f"database has schema v{version}, newer than this mverify (v{SCHEMA_VERSION}); "
+                              "upgrade mverify")
+        schema_sql = resources.files("mverify.db").joinpath("schema.sql").read_text()
         with self.transaction():
+            if version is not None and version < SCHEMA_VERSION:
+                migrations.upgrade(self.con, schema_sql, version, SCHEMA_VERSION)
+            self.con.execute(schema_sql)
             self.con.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", [str(SCHEMA_VERSION)])
             self.con.executemany(
-                "INSERT INTO variables VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET "
-                "label = excluded.label, unit = excluded.unit, lo = excluded.lo, hi = excluded.hi",
-                [(v.name, v.label, v.unit, v.kind, v.level, v.lo, v.hi) for v in V.CATALOG.values()])
+                "INSERT INTO variables (name, label, unit, kind, level_hpa, lo, hi, sigma_o) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET label = excluded.label, "
+                "unit = excluded.unit, lo = excluded.lo, hi = excluded.hi, sigma_o = excluded.sigma_o",
+                [(v.name, v.label, v.unit, v.kind, v.level, v.lo, v.hi, v.sigma_o) for v in V.CATALOG.values()])
             self.con.executemany(
                 "INSERT INTO qc_flags VALUES (?, ?, ?) ON CONFLICT (bit) DO UPDATE SET "
                 "name = excluded.name, description = excluded.description",
@@ -184,7 +221,8 @@ class ObsStore:
     def _check_version(self) -> None:
         v = self._version()
         if v != SCHEMA_VERSION:
-            raise SchemaError(f"database has schema v{v}, this mverify reads v{SCHEMA_VERSION}")
+            raise SchemaError(f"database has schema v{v}, this mverify reads v{SCHEMA_VERSION}; "
+                              "run `mverify db init` to upgrade it")
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -217,6 +255,47 @@ class ObsStore:
         finally:
             self.con.unregister("_stations")
         return len(df)
+
+    def set_sensor_heights(self, df: pd.DataFrame) -> tuple[int, list[str]]:
+        """Set thermometer / anemometer heights from rows naming a station by station_id, wmo or icao.
+
+        A row may carry either height; a missing one leaves the stored value alone. Returns
+        the number of stations updated and the identifiers of rows that matched no station.
+        """
+        self._require_writable()
+        keys = [c for c in ("station_id", "wmo", "icao") if c in df.columns]
+        heights = [c for c in ("t_height_m", "wind_height_m") if c in df.columns]
+        if not keys or not heights:
+            raise ValidationError("sensor file needs a station_id, wmo or icao column and t_height_m and/or "
+                                  "wind_height_m")
+        rows = df.reindex(columns=["station_id", "wmo", "icao", "t_height_m", "wind_height_m"]).copy()
+        for c in ("station_id", "wmo", "icao"):
+            rows[c] = rows[c].astype("string").str.strip().replace("", pd.NA)
+        rows["wmo"] = rows["wmo"].str.zfill(5)
+        for c in ("t_height_m", "wind_height_m"):
+            rows[c] = pd.to_numeric(rows[c], errors="coerce")
+        _fail("have a thermometer height outside 0.5..30 m", rows,
+              rows["t_height_m"].notna() & ~rows["t_height_m"].between(0.5, 30))
+        _fail("have an anemometer height outside 1..100 m", rows,
+              rows["wind_height_m"].notna() & ~rows["wind_height_m"].between(1, 100))
+        rows["_row"] = np.arange(len(rows))
+        self.con.register("_sensors", rows)
+        try:
+            # Every station a row names: by its own id, or all stations sharing the WMO index or ICAO code.
+            match = ("FROM _sensors x JOIN stations s ON s.station_id = x.station_id "
+                     "OR (x.station_id IS NULL AND (s.wmo_id = x.wmo OR s.icao = x.icao))")
+            unmatched = self.con.execute(f"SELECT coalesce(station_id, wmo, icao) FROM _sensors WHERE _row NOT IN "
+                                         f"(SELECT x._row {match})").fetchall()
+            with self.transaction():
+                n = self.con.execute(
+                    "UPDATE stations SET t_height_m = coalesce(m.t_height_m, stations.t_height_m), "
+                    "wind_height_m = coalesce(m.wind_height_m, stations.wind_height_m), updated_at = now() "
+                    f"FROM (SELECT s.station_id, any_value(x.t_height_m) AS t_height_m, "
+                    f"any_value(x.wind_height_m) AS wind_height_m {match} GROUP BY s.station_id) m "
+                    "WHERE stations.station_id = m.station_id").fetchone()[0]
+        finally:
+            self.con.unregister("_sensors")
+        return int(n), [str(r[0]) for r in unmatched]
 
     def _check_references(self, obs: pd.DataFrame) -> None:
         ids = obs["station_id"].drop_duplicates()
@@ -287,6 +366,43 @@ class ObsStore:
                  for key, version, rows_in in objects])
         return n
 
+    # ---- gridded analyses
+
+    def add_grid(self, da: xr.DataArray) -> str:
+        """Store one analysis window (see mverify.precip.analyses) and catalogue it; returns its uri."""
+        self._require_writable()
+        product, hours = str(da.attrs["product"]), int(da.attrs["accum_hours"])
+        valid = pd.Timestamp(da.attrs["valid_time"])
+        if valid != valid.floor("h"):
+            raise ValidationError(f"{product}: window end {valid} is not a whole hour")
+        uri = f"{product}/{hours}h/{valid:%Y/%Y%m%d%H}.zarr"
+        dest = Path(self.grid_root) / uri
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        shutil.rmtree(tmp, ignore_errors=True)
+        da.astype("float32").to_dataset(name="tp").to_zarr(tmp, mode="w", consolidated=False)
+        shutil.rmtree(dest, ignore_errors=True)
+        tmp.rename(dest)
+        self.con.execute("INSERT OR REPLACE INTO grids VALUES (?, 'tp', ?, ?, ?)",
+                         [product, hours, valid.to_pydatetime(), uri])
+        return uri
+
+    def grid_times(self, product: str, accum_hours: int, start, end) -> list[pd.Timestamp]:
+        rows = self.con.execute(
+            "SELECT valid_time FROM grids WHERE product = ? AND variable = 'tp' AND accum_hours = ? "
+            "AND valid_time BETWEEN ? AND ? ORDER BY 1",
+            [product, accum_hours, pd.Timestamp(start).to_pydatetime(), pd.Timestamp(end).to_pydatetime()]).fetchall()
+        return [pd.Timestamp(r[0]) for r in rows]
+
+    def get_grid(self, product: str, accum_hours: int, valid_time) -> xr.DataArray | None:
+        row = self.con.execute(
+            "SELECT uri FROM grids WHERE product = ? AND variable = 'tp' AND accum_hours = ? AND valid_time = ?",
+            [product, accum_hours, pd.Timestamp(valid_time).to_pydatetime()]).fetchone()
+        if row is None:
+            return None
+        with xr.open_zarr(f"{self.grid_root}/{row[0]}", consolidated=False) as ds:
+            return ds["tp"].load()
+
     def check_integrity(self) -> dict[str, int]:
         """Counts of rows breaking each rule the schema does not enforce itself; all zero when healthy."""
         q = {
@@ -308,10 +424,17 @@ class ObsStore:
                                [source, object_key]).fetchone()
         return row[0] if row else None
 
+    def ingested_versions(self, source: str) -> dict[str, str]:
+        """object_key -> version of everything ingested from ``source``, for update planning in bulk."""
+        return dict(self.con.execute("SELECT object_key, version FROM ingest_log WHERE source = ?",
+                                     [source]).fetchall())
+
     def fetch_obs(self, variables: Sequence[str], start, end,
                   bbox: tuple[float, float, float, float] | None = None,
                   networks: Sequence[str] | None = None, clean_only: bool = True) -> pd.DataFrame:
         """Observations with station metadata for ``variables`` valid in [start, end].
+
+        ``bbox`` selects by station position; the returned lat/lon are the observation's own.
 
         ``bbox`` is (lon_min, lat_min, lon_max, lat_max) in degrees, lon in -180..180;
         a box with lon_min > lon_max crosses the dateline.
@@ -332,8 +455,10 @@ class ObsStore:
             else:
                 where.append("(s.lon >= ? OR s.lon <= ?)")
             args += [lo0, lo1]
+        # lat/lon are where the value was observed: the drifted balloon position when known, else the station.
         return self.con.execute(
-            "SELECT o.station_id, o.valid_time, o.variable, o.value, s.lat, s.lon, s.elev_m, s.network "
+            "SELECT o.station_id, o.valid_time, o.variable, o.value, o.dt_min, coalesce(o.lat, s.lat) AS lat, "
+            "coalesce(o.lon, s.lon) AS lon, s.elev_m, s.t_height_m, s.wind_height_m, s.network "
             "FROM obs o JOIN stations s USING (station_id) WHERE " + " AND ".join(where)
             + " ORDER BY o.variable, o.valid_time, o.station_id", args).df()
 
@@ -354,8 +479,10 @@ class ObsStore:
         """Write the snapshot layout read by ``ObsStore.snapshot``."""
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
-        for t in ("stations", "variables"):
+        for t in ("stations", "variables", "grids"):
             self.con.execute(f"COPY {t} TO {_lit(root / (t + '.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+        if self.grid_root and Path(self.grid_root).is_dir():
+            shutil.copytree(self.grid_root, root / "grids", dirs_exist_ok=True)
         self.con.execute(
             "COPY (SELECT *, year(valid_time) AS year, month(valid_time) AS month FROM obs "
             "ORDER BY variable, valid_time, station_id) "

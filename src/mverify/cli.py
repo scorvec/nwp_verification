@@ -8,6 +8,16 @@ import sys
 from pathlib import Path
 
 from mverify import __version__
+from mverify.match import MAX_DZ
+
+
+def pd_now():
+    import pandas as pd
+    return pd.Timestamp.now("UTC").tz_localize(None)
+
+
+def _optional_float(s: str) -> float | None:
+    return None if s.lower() in ("none", "off") else float(s)
 
 
 def _bbox(s: str | None):
@@ -44,8 +54,9 @@ def cmd_inspect(a) -> int:
     if s.empty:
         print("no recognised variables")
         return 1
-    print(f"model: {fc.name}   fields: {len(s)}   orography: "
-          f"{'yes' if any(f.grid.orog is not None for f in fc.fields) else 'no'}")
+    has = {name: "yes" if any(getattr(f.grid, attr) is not None for f in fc.fields) else "no"
+           for name, attr in (("orography", "orog"), ("land-sea mask", "lsm"), ("roughness", "z0"))}
+    print(f"model: {fc.name}   fields: {len(s)}   " + "   ".join(f"{k}: {v}" for k, v in has.items()))
     agg = s.groupby("var").agg(inits=("init", "nunique"), first_init=("init", "min"),
                                leads=("lead_h", lambda x: ",".join(f"{v:g}" for v in sorted(set(x)))),
                                members=("member", "nunique"), grid=("grid", "first"), shape=("shape", "first"))
@@ -56,11 +67,13 @@ def cmd_inspect(a) -> int:
 def cmd_score(a) -> int:
     from mverify import report
     from mverify.db.store import ObsStore
+    from mverify.match import T_HEIGHT_RANGE
     from mverify.verify import verify
     store = ObsStore.snapshot(a.snapshot) if a.snapshot else ObsStore.open(a.db, read_only=True)
     with store:
         res = verify(_models(a.paths), store, regions=a.region, variables=a.var, networks=a.network,
-                     height_correction=not a.no_height_correction, init=a.init)
+                     height_correction=not a.no_height_correction, init=a.init, max_dz=a.max_dz,
+                     t_height_range=None if a.any_thermometer_height else T_HEIGHT_RANGE)
     if res.table.empty:
         print("no forecast/observation pairs: check the valid times and region against `mverify db status`")
         return 1
@@ -95,6 +108,19 @@ def cmd_db(a) -> int:
             from mverify.ingest import soundings
             n = soundings.ingest(s, root=a.root, since=a.since, bbox=_bbox(a.bbox))
             print(f"{n} rows written")
+        elif a.db_cmd == "precip":
+            from mverify.db.store import db_path
+            from mverify.precip import analyses
+            end = a.end or pd_now()
+            for product in a.product:
+                n = analyses.ingest(s, product, a.start, end, db_path(a.db).parent / "cache")
+                print(f"{product}: {n} windows added")
+        elif a.db_cmd == "sensors":
+            import pandas as pd
+            n, unmatched = s.set_sensor_heights(pd.read_csv(a.file, dtype=str))
+            print(f"sensor heights set for {n} stations")
+            if unmatched:
+                print(f"{len(unmatched)} rows matched no station, e.g. {unmatched[:5]}")
         elif a.db_cmd == "export":
             s.export_parquet(a.out)
             print(f"snapshot -> {a.out}")
@@ -120,11 +146,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--var", nargs="+", help="variables to score (default: all recognised)")
     p.add_argument("--network", nargs="+", help="observation networks (GHCNH, RAOB)")
     p.add_argument("--init", help="init time, when the files do not carry one")
-    p.add_argument("--stat", default="rmse", help="score shown in the table (rmse, bias, mae, corr, crps)")
+    p.add_argument("--stat", default="rmse", help="score shown in the table (rmse, rmse_oc, bias, mae, corr, "
+                   "crps, crps_oe, spread, ssr, ssr_oe)")
     p.add_argument("--out", help="write the scorecard JSON here")
     p.add_argument("--pairs", help="write the matched pairs (Parquet) here")
     p.add_argument("--no-height-correction", action="store_true",
                    help="do not move 2 m temperature to station height")
+    p.add_argument("--max-dz", type=_optional_float, default=MAX_DZ, metavar="M",
+                   help=f"drop surface pairs where model terrain and station differ by more than M m "
+                        f"(default {MAX_DZ:g}; 'none' keeps all)")
+    p.add_argument("--any-thermometer-height", action="store_true",
+                   help="keep t2m/td2m from thermometers outside the 1.25-2.5 m siting range")
     p.set_defaults(fn=cmd_score)
 
     p = sub.add_parser("db", help="build and inspect the observation database")
@@ -142,6 +174,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--root", default=None, help="mirror URL or local checkout of the skewt-data branch")
     r.add_argument("--since", help="only ascents at or after this time")
     r.add_argument("--bbox")
+    pr = dsub.add_parser("precip", help="add precipitation analyses (Stage IV over CONUS; GPCP and IMERG Late "
+                         "globally, which need EARTHDATA_USERNAME / EARTHDATA_PASSWORD)")
+    pr.add_argument("--product", nargs="+", default=["stageiv", "gpcp", "imerg_late"],
+                    choices=["stageiv", "gpcp", "imerg_late"])
+    pr.add_argument("--start", required=True, help="first window end, e.g. 2026-10-01")
+    pr.add_argument("--end", help="last window end (default now)")
+    sn = dsub.add_parser("sensors", help="load thermometer and anemometer heights from a CSV")
+    sn.add_argument("file", help="CSV with one of station_id / wmo / icao, and t_height_m and/or wind_height_m")
     e = dsub.add_parser("export", help="write the Parquet snapshot")
     e.add_argument("out")
     p.set_defaults(fn=cmd_db)

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -27,13 +28,20 @@ from mverify import __version__
 from mverify import variables as V
 from mverify.scores import REGION_LABELS
 
-TRUTH = {"GHCNH": ("ghcnh", "surface stations (GHCNh)"), "RAOB": ("raob", "radiosondes")}
-STATS = ("rmse", "bias", "mae", "corr", "crps", "spread", "ssr", "n")
+TRUTH = {"GHCNH": ("ghcnh", "surface stations (GHCNh)"), "RAOB": ("raob", "radiosondes"),
+         "STAGEIV": ("stageiv", "Stage IV analysis"), "GPCP": ("gpcp", "GPCP analysis"),
+         "IMERG_LATE": ("imerg_late", "IMERG Late analysis")}
+STATS = ("rmse", "rmse_oc", "bias", "mae", "corr", "crps", "crps_oe", "spread", "spread_oe", "ssr", "ssr_oe",
+         "ets", "fbias", "pod", "far", "fss_50km", "fss_100km", "fss_200km", "fss_400km", "fcst_mean", "obs_mean",
+         "base_rate", "n")
 
 
 def _label(var: str) -> tuple[str, str]:
     if var in V.CATALOG:
         return V.CATALOG[var].label, V.CATALOG[var].unit
+    if m := re.fullmatch(r"tp(\d+)(?:>=([\d.]+)mm)?", var):
+        hours, thr = m.groups()
+        return (f"{hours} h precipitation" + (f" >= {thr} mm" if thr else "")), ("mm" if not thr else "")
     if var.startswith("wind"):
         lev = var[4:]
         return ("10 m vector wind" if lev == "10" else f"{lev} hPa vector wind"), "m s-1"

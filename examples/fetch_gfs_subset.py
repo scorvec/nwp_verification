@@ -17,7 +17,8 @@ from pathlib import Path
 BUCKET = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 DEFAULT_FIELDS = [
     ":TMP:2 m above ground:", ":DPT:2 m above ground:", ":PRMSL:mean sea level:",
-    ":UGRD:10 m above ground:", ":VGRD:10 m above ground:", ":HGT:surface:",
+    ":UGRD:10 m above ground:", ":VGRD:10 m above ground:", ":HGT:surface:", ":LAND:surface:",
+    ":SFCR:surface:",
     ":HGT:500 mb:", ":TMP:850 mb:", ":UGRD:250 mb:", ":VGRD:250 mb:",
 ]
 

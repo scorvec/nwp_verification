@@ -60,7 +60,7 @@ def test_sounding_mandatory_levels():
         "pressure_hPa": [1000, 880, 830, 500, 400], "geopotential height_m": [100, 990, 1950, 5600, 7300],
         "temperature_C": [15, 9, 3, -20, -30], "wind direction_degree": [270, 270, 270, 180, 180],
         "wind speed_m/s": [5, 5, 5, 10, 10]})
-    lev = soundings.mandatory_levels(prof)
+    lev = soundings.mandatory_levels(prof)["value"]
     assert lev["z500"] == 5600 and lev["v500"] == pytest.approx(10.0)
     w = np.log(850 / 880) / np.log(830 / 880)
     assert lev["t850"] == pytest.approx(9 + w * (3 - 9))
@@ -74,3 +74,124 @@ def test_sounding_positions_must_agree_with_the_wmo_list():
     assert soundings.position_confirmed("31770", 48.9, 140.2, ref)
     assert soundings.position_confirmed("47000", 40.0, -179.9, ref)  # across the dateline
     assert soundings.position_confirmed("99999", 10.0, 10.0, ref)
+
+
+def _ascent(**cols):
+    """A sounding rising through 1000-200 hPa with heights from a 7.5 km scale height."""
+    p = np.array([1000, 925, 850, 700, 500, 300, 250, 200], float)
+    z = 7500 * np.log(1000 / p)
+    prof = pd.DataFrame({"pressure_hPa": p, "geopotential height_m": z, "temperature_C": 15 - 0.0065 * z,
+                         "wind direction_degree": 270.0, "wind speed_m/s": 10.0})
+    for k, v in cols.items():
+        prof[k] = v
+    return prof
+
+
+def test_drift_from_winds_and_the_standard_ascent_rate():
+    # A 10 m/s westerly, no per-level times: launch 45 min before the hour, rising at 5 m/s.
+    lev = soundings.mandatory_levels(_ascent(), pd.Timestamp("2026-10-13 12:00"), 0.0, 10.0)
+    z500 = 7500 * np.log(2)
+    flight = z500 / soundings.ASCENT_RATE
+    assert lev.loc["z500", "dt_min"] == round(-45 + flight / 60)
+    assert lev.loc["z500", "lat"] == pytest.approx(0.0, abs=1e-9)
+    assert lev.loc["z500", "lon"] == pytest.approx(10.0 + np.rad2deg(10.0 * flight / soundings.EARTH_RADIUS))
+    assert lev.loc["z1000", "lon"] == pytest.approx(10.0)
+
+
+def test_drift_uses_reported_times_and_positions():
+    hour = pd.Timestamp("2026-10-13 00:00")
+    times = hour + pd.to_timedelta(np.linspace(-50, -10, 8), unit="min")
+    lev = soundings.mandatory_levels(_ascent(time=times.astype(str)), hour, 0.0, 10.0)
+    assert lev.loc["z200", "dt_min"] == -10 and lev.loc["z1000", "dt_min"] == -50
+    gps = _ascent(time=times.astype(str), latitude=np.linspace(0, 0.4, 8), longitude=np.linspace(10, 9.8, 8))
+    lev = soundings.mandatory_levels(gps, hour, 0.0, 10.0)  # the reported track wins over the winds
+    assert lev.loc["z200", ["lat", "lon"]].tolist() == pytest.approx([0.4, 9.8])
+
+
+def test_a_time_column_holding_only_the_launch_time_is_not_a_flight_time():
+    hour = pd.Timestamp("2026-10-13 12:00")
+    lev = soundings.mandatory_levels(_ascent(time=str(hour)), hour, 0.0, 10.0)
+    assert lev.loc["z200", "dt_min"] > lev.loc["z1000", "dt_min"]  # fell back to the ascent rate
+
+
+def test_drift_across_the_dateline():
+    lev = soundings.mandatory_levels(_ascent(), pd.Timestamp("2026-10-13 12:00"), 0.0, 179.9)
+    assert -180 <= lev.loc["z200", "lon"] < -179.5
+
+
+def test_downloads_retry_a_body_cut_off_mid_transfer(monkeypatch):
+    import http.client
+
+    from mverify.ingest import http as H
+
+    class Body:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            if self.fail:
+                raise http.client.IncompleteRead(b"x", 10)
+            return b"whole"
+
+    calls = []
+    monkeypatch.setattr(H.urllib.request, "urlopen", lambda url, timeout: calls.append(url) or Body(len(calls) == 1))
+    monkeypatch.setattr(H.time, "sleep", lambda s: None)
+    assert H.get("https://example.invalid/f") == b"whole" and len(calls) == 2
+
+
+def test_earthdata_login_follows_the_data_server_redirect(monkeypatch):
+    import base64
+    import email.message
+    import io
+    import urllib.parse
+    import urllib.request
+    import urllib.response
+
+    from mverify.ingest import http as H
+
+    seen = []
+
+    class Servers(urllib.request.BaseHandler):
+        """GES DISC redirects to Earthdata, which checks the login and sends a code back for a session cookie."""
+        handler_order = 100  # ahead of the real HTTPS handler
+
+        def https_open(self, req):
+            host, auth = urllib.parse.urlsplit(req.full_url).hostname, req.get_header("Authorization")
+            seen.append((host, auth is not None))
+            headers, body, code = email.message.Message(), b"", 200
+            if host == "data.example.gov" and "session=1" in (req.get_header("Cookie") or ""):
+                body = b"precip"
+            elif host == "data.example.gov" and "code=" in req.full_url:  # the server's own login callback
+                code, headers["Location"] = 302, "https://data.example.gov/f.nc4"
+                headers["Set-Cookie"] = "session=1; Path=/"
+            elif host == "data.example.gov":
+                code, headers["Location"] = 302, f"https://{H.EARTHDATA}/oauth/authorize?app=gesdisc"
+            elif auth == "Basic " + base64.b64encode(b"shawn:right").decode():
+                code, headers["Location"] = 302, "https://data.example.gov/login?code=abc"
+            else:
+                code, headers["WWW-Authenticate"] = 401, 'Basic realm="Please enter your Earthdata Login"'
+                body = b"<p>Invalid username or password</p>"
+            r = urllib.response.addinfourl(io.BytesIO(body), headers, req.full_url, code)
+            r.msg = "test"
+            return r
+
+    def opener():
+        o = H.earthdata_opener()
+        o.add_handler(Servers())
+        return o
+
+    monkeypatch.setenv("EARTHDATA_USERNAME", "shawn")
+    monkeypatch.setenv("EARTHDATA_PASSWORD", "right\n")  # pasted secrets end in a newline
+    assert H.get("https://data.example.gov/f.nc4", opener=opener()) == b"precip"
+    assert seen == [("data.example.gov", False), (H.EARTHDATA, True),  # no 401 round trip
+                    ("data.example.gov", False), ("data.example.gov", False)]  # the password stays at Earthdata
+
+    monkeypatch.setenv("EARTHDATA_PASSWORD", "wrong")
+    with pytest.raises(PermissionError, match="Invalid username or password"):
+        H.get("https://data.example.gov/f.nc4", opener=opener())

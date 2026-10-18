@@ -9,7 +9,8 @@ import pandas as pd
 from mverify import scores
 from mverify.db.store import ObsStore
 from mverify.io.open import Forecast, open_forecast
-from mverify.match import match
+from mverify.match import MAX_DZ, T_HEIGHT_RANGE, match
+from mverify.precip.verify import verify_precip
 from mverify.report import scorecard
 
 
@@ -25,12 +26,14 @@ class Result:
 
 def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = None,
            regions: list[str] | None = None, variables: list[str] | None = None,
-           networks: list[str] | None = None, height_correction: bool = True, init=None) -> Result:
+           networks: list[str] | None = None, height_correction: bool = True, init=None,
+           max_dz: float | None = MAX_DZ, t_height_range: tuple[float, float] | None = T_HEIGHT_RANGE) -> Result:
     """Score one or more models.
 
     ``forecasts`` is a path / glob / list of paths (one model, named from the
     file names), or ``{"GFS": [...], "IFS": [...]}`` for several. ``regions``
-    defaults to every region in mverify.scores.REGIONS that holds pairs.
+    defaults to every region in mverify.scores.REGIONS that holds pairs. ``max_dz`` and
+    ``t_height_range`` are passed to mverify.match.match (None keeps every pair).
     """
     own = store is None
     store = store or ObsStore.open(read_only=True)
@@ -39,12 +42,19 @@ def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = Non
             fcs = [open_forecast(p, name=n, init=init) for n, p in forecasts.items()]
         else:
             fcs = [open_forecast(forecasts, init=init)]
-        pairs = pd.concat([match(fc, store, variables, networks=networks, height_correction=height_correction)
+        pairs = pd.concat([match(fc, store, variables, networks=networks, height_correction=height_correction,
+                                 max_dz=max_dz, t_height_range=t_height_range)
                            for fc in fcs], ignore_index=True)
+        precip = [verify_precip(fc, store, regions=regions) for fc in fcs
+                  if not variables or any(v.startswith("tp") for v in variables)]
     finally:
         if own:
             store.close()
-    return score_pairs(pairs, regions, fcs)
+    result = score_pairs(pairs, regions, fcs)
+    precip = [t for t in precip if not t.empty]
+    if precip:
+        result.table = pd.concat([result.table, *precip], ignore_index=True)
+    return result
 
 
 def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list[Forecast] = ()) -> Result:
@@ -56,7 +66,8 @@ def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list
     det_pairs = rp
     if rp["member"].notna().any():  # deterministic scores of an ensemble are those of its mean
         keys = ["model", "network", "variable", "region", "lead_h", "init", "valid_time", "station_id"]
-        det_pairs = rp.groupby(keys, dropna=False).agg(fcst=("fcst", "mean"), obs=("obs", "first")).reset_index()
+        det_pairs = rp.groupby(keys, dropna=False).agg(fcst=("fcst", "mean"), obs=("obs", "first"),
+                                                     sigma_o=("sigma_o", "first")).reset_index()
     tables = [scores.deterministic(det_pairs, by), scores.vector_wind(rp.assign(member=rp["member"].fillna(-1)), by)]
     if rp["member"].notna().any():
         tables.append(scores.ensemble(rp, by))

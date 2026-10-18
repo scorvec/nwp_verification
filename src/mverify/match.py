@@ -2,19 +2,38 @@
 
 For every field (variable x init x lead x member) the observations valid at
 the field's valid time are fetched once from the database, the field is
-interpolated to their stations, and one pair row per station is emitted:
+interpolated to where each observation was made (the station, or the drifted
+balloon position for a radiosonde level), and one pair row per observation is
+emitted with the columns in PAIR_COLUMNS.
 
-    model, init, lead_h, member, valid_time, station_id, network, lat, lon,
-    variable, fcst, obs
+Making the two sides comparable:
+  * terrain: ``dz_m`` is model terrain minus station elevation (surface
+    variables, when the model's orography is known). 2 m temperature is moved
+    to the station height with the standard-atmosphere lapse rate (6.5 K/km).
+    Surface pairs with |dz_m| > ``max_dz`` (100 m) are dropped, because there
+    the station samples a different climate than the model grid box (valley vs
+    ridge, sheltered vs exposed wind) and no lapse rate fixes that. Pairs whose
+    dz_m is unknown (no orography in the files) are kept.
+  * sensor height: an anemometer not at 10 m is brought to 10 m with the
+    neutral log wind profile, u(10)/u(h) = ln(10/z0)/ln(h/z0), with z0 from the
+    model's surface roughness when the file has it, else Z0_DEFAULT. A
+    thermometer outside ``t_height_range`` (1.25-2.5 m, the WMO siting range)
+    is dropped; within it the height is kept in ``sensor_h_m`` so scores can be
+    stratified by it. Unknown heights are assumed standard.
+  * coastlines: when the files carry a land-sea mask, surface variables at
+    (land) stations are interpolated from land grid points only, so a coastal
+    station is not handed the sea's temperature or wind; a station with no land
+    point among its neighbours is dropped. The model land fraction at the
+    station is kept in ``land_frac`` for stratifying coastal stations.
+  * observation error: ``sigma_o`` from the variable catalogue travels with each
+    pair for the error-aware scores in mverify.scores.
 
-2 m temperature is moved from the model's terrain height to the station's
-with the standard-atmosphere lapse rate (6.5 K/km) when the model's
-orography is known; the correction applied is kept in ``dz_m``. 10 m wind
-speed is derived from u10/v10 when the model does not provide it.
+10 m wind speed is derived from u10/v10 when the model does not provide it.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 
 import numpy as np
@@ -25,9 +44,24 @@ from mverify.db.store import ObsStore
 from mverify.interp import PointInterpolator
 from mverify.io.open import Field, Forecast
 
-LAPSE = 0.0065  # K m-1
+log = logging.getLogger(__name__)
+
+LAPSE = 0.0065       # K m-1
+MAX_DZ = 100.0       # m, largest model-station terrain difference for surface pairs
+T_HEIGHT_RANGE = (1.25, 2.5)  # m, WMO siting range for thermometers
+Z0_DEFAULT = 0.03    # m, roughness of open short grass, the WMO reference exposure
+WIND_10M = ("u10", "v10", "ws10")
+SCREEN = ("t2m", "td2m")
 PAIR_COLUMNS = ["model", "init", "lead_h", "member", "valid_time", "station_id", "network", "lat", "lon",
-                "variable", "fcst", "obs", "dz_m"]
+                "variable", "fcst", "obs", "dz_m", "dt_min", "sensor_h_m", "land_frac", "sigma_o"]
+LAND = 0.5           # grid points with a land fraction at least this are land
+
+
+def log_wind_factor(h: np.ndarray, z0: np.ndarray) -> np.ndarray:
+    """Factor taking a wind measured at height ``h`` to 10 m in a neutral log profile."""
+    z0 = np.clip(z0, 1e-4, 2.0)
+    h = np.maximum(h, 2 * z0)  # the profile is undefined at or below the roughness length
+    return np.log(10.0 / z0) / np.log(h / z0)
 
 
 def _grid_bbox(fc: Forecast) -> tuple[float, float, float, float] | None:
@@ -47,10 +81,15 @@ def _grid_bbox(fc: Forecast) -> tuple[float, float, float, float] | None:
 
 def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
           bbox: tuple[float, float, float, float] | None = None, networks: list[str] | None = None,
-          height_correction: bool = True) -> pd.DataFrame:
+          height_correction: bool = True, max_dz: float | None = MAX_DZ,
+          t_height_range: tuple[float, float] | None = T_HEIGHT_RANGE) -> pd.DataFrame:
+    """Pairs for every field of ``fc`` with an observation; see the module docstring for the adjustments.
+
+    ``max_dz=None`` keeps every surface pair, ``t_height_range=None`` every thermometer height.
+    """
     have = set(fc.variables())
     derivable = {name for name, (parts, _) in V.DERIVED.items() if set(parts) <= have and name not in have}
-    wanted = sorted((have | derivable) - {"orog"})
+    wanted = sorted((have | derivable) - set(V.STATIC) - set(V.GRIDDED))
     if variables:
         wanted = [v for v in wanted if v in variables]
     if not wanted or not fc.fields:
@@ -60,19 +99,38 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
     if obs.empty:
         return pd.DataFrame(columns=PAIR_COLUMNS)
 
-    stations = obs.drop_duplicates("station_id").reset_index(drop=True)
-    sidx = pd.Series(np.arange(len(stations)), index=stations["station_id"])
-    obs["sidx"] = sidx.loc[obs["station_id"]].to_numpy()
+    if t_height_range is not None:
+        h = obs["t_height_m"]
+        off = obs["variable"].isin(SCREEN) & h.notna() & ~h.between(*t_height_range)
+        if off.any():
+            log.info("dropped %d t2m/td2m observations from thermometers outside %s m", off.sum(), t_height_range)
+            obs = obs[~off]
+
+    # Interpolation weights are computed once per grid for every distinct observation point.
+    points = obs[["lat", "lon"]].drop_duplicates().reset_index(drop=True)
+    obs = obs.merge(points.reset_index(names="pidx"), on=["lat", "lon"], how="left")
     groups = {k: g for k, g in obs.groupby(["variable", "valid_time"], sort=False)}
 
     interps: dict[tuple, PointInterpolator] = {}
     model_z: dict[tuple, np.ndarray] = {}
+    model_z0: dict[tuple, np.ndarray] = {}
+    land_frac: dict[tuple, np.ndarray] = {}
+    land_interps: dict[tuple, PointInterpolator] = {}
 
-    def interp(f: Field) -> PointInterpolator:
+    def interp(f: Field, surface: bool = False) -> PointInterpolator:
         if f.grid.key not in interps:
-            interps[f.grid.key] = PointInterpolator(f.grid, stations["lat"].to_numpy(), stations["lon"].to_numpy())
+            ip = interps[f.grid.key] = PointInterpolator(f.grid, points["lat"].to_numpy(), points["lon"].to_numpy())
+            if f.grid.lsm is not None:
+                land_frac[f.grid.key] = ip(f.grid.lsm)
+                land_interps[f.grid.key] = ip.over(f.grid.lsm >= LAND)
+            # Terrain and roughness from the same (land) neighbours the surface forecast uses.
+            surf = land_interps.get(f.grid.key, ip)
             if f.grid.orog is not None:
-                model_z[f.grid.key] = interps[f.grid.key](f.grid.orog)
+                model_z[f.grid.key] = surf(f.grid.orog)
+            if f.grid.z0 is not None:
+                model_z0[f.grid.key] = surf(f.grid.z0)
+        if surface and f.grid.key in land_interps:
+            return land_interps[f.grid.key]
         return interps[f.grid.key]
 
     # Components for derived variables, keyed by (init, lead, member, grid).
@@ -87,21 +145,36 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
         g = groups.get((var, f.valid))
         if g is None:
             return
-        which = g["sidx"].to_numpy()
-        fcst = interp(f)(values_fn(), which)
-        dz = np.zeros(len(which))
-        if var == "t2m" and height_correction and f.grid.key in model_z:
+        which = g["pidx"].to_numpy()
+        surface = V.CATALOG[var].kind == "surface"
+        fcst = interp(f, surface)(values_fn(), which)
+        o = g["value"].to_numpy(float)
+        lf = land_frac[f.grid.key][which] if surface and f.grid.key in land_frac else np.full(len(which), np.nan)
+        dz = np.full(len(which), np.nan)
+        if surface and f.grid.key in model_z:
             dz = model_z[f.grid.key][which] - g["elev_m"].to_numpy(float)
-            dz = np.where(np.isfinite(dz), dz, 0.0)
-            fcst = fcst + LAPSE * dz
+        if var == "t2m" and height_correction:
+            fcst = fcst + LAPSE * np.nan_to_num(dz)
+        sensor_h = np.full(len(which), np.nan)
+        if var in SCREEN:
+            sensor_h = g["t_height_m"].to_numpy(float)
+        elif var in WIND_10M:
+            sensor_h = g["wind_height_m"].to_numpy(float)
+            z0 = model_z0[f.grid.key][which] if f.grid.key in model_z0 else np.full(len(which), Z0_DEFAULT)
+            z0 = np.where(np.isfinite(z0), z0, Z0_DEFAULT)
+            known = np.isfinite(sensor_h)
+            o = np.where(known, o * log_wind_factor(np.where(known, sensor_h, 10.0), z0), o)
         ok = np.isfinite(fcst)
+        if surface and max_dz is not None:
+            ok &= ~(np.abs(dz) > max_dz)  # unknown dz (NaN) is kept
         if not ok.any():
             return
         out.append(pd.DataFrame({
             "model": fc.name, "init": f.init, "lead_h": f.lead_h, "member": f.member,
             "valid_time": f.valid, "station_id": g["station_id"].to_numpy()[ok],
             "network": g["network"].to_numpy()[ok], "lat": g["lat"].to_numpy()[ok], "lon": g["lon"].to_numpy()[ok],
-            "variable": var, "fcst": fcst[ok], "obs": g["value"].to_numpy()[ok], "dz_m": dz[ok]}))
+            "variable": var, "fcst": fcst[ok], "obs": o[ok], "dz_m": dz[ok], "dt_min": g["dt_min"].to_numpy()[ok],
+            "sensor_h_m": sensor_h[ok], "land_frac": lf[ok], "sigma_o": V.CATALOG[var].sigma_o}))
 
     for f in fc.fields:
         if f.var in wanted:

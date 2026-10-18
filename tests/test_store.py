@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import duckdb
 import numpy as np
 import pandas as pd
@@ -42,7 +44,8 @@ def test_schema_version_mismatch_is_refused(tmp_path):
     ({"variable": "nonsense"}, "outside the catalogue"),
     ({"value": np.nan}, "non-finite"),
     ({"valid_time": "2026-10-13 00:51"}, "whole hour"),
-    ({"dt_min": 75}, "dt_min"),
+    ({"dt_min": 200}, "dt_min"),
+    ({"lat": 41.0}, "only one of lat/lon"),
     ({"qc": 1 << 12}, "qc bits"),
 ])
 def test_bad_rows_are_rejected_with_a_reason(store, stations, bad, message):
@@ -158,3 +161,62 @@ def test_read_only_store_refuses_writes(tmp_path, stations):
             s.upsert_stations(stations)
         with pytest.raises(duckdb.Error):
             s.con.execute("DELETE FROM obs")
+
+
+def _layout(con) -> list[tuple]:
+    cols = con.execute("SELECT table_name, column_index, column_name, data_type, is_nullable, column_default "
+                       "FROM duckdb_columns() WHERE schema_name = 'main' ORDER BY 1, 2").fetchall()
+    checks = con.execute("SELECT table_name, constraint_type, expression FROM duckdb_constraints() "
+                         "WHERE schema_name = 'main' ORDER BY ALL").fetchall()
+    return cols + checks
+
+
+def test_a_v1_database_is_upgraded_to_the_current_schema_with_its_rows(tmp_path, stations):
+    p = tmp_path / "v1.duckdb"
+    con = duckdb.connect(str(p))
+    con.execute((Path(__file__).parent / "data" / "schema_v1.sql").read_text())
+    con.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    con.execute("INSERT INTO stations (station_id, network, lat, lon, elev_m) VALUES ('GHCNH:A', 'GHCNH', 40, -100, 5)")
+    con.execute("INSERT INTO obs VALUES ('GHCNH:A', '2026-10-13 00:00', 't2m', 10.5, 0, -7, 'ghcnh:FM15')")
+    con.execute("INSERT INTO ingest_log (source, object_key, version, rows_in, rows_kept) "
+                "VALUES ('ghcnh', 'A/2026', 'etag', 1, 1)")
+    con.close()
+
+    with ObsStore.open(p) as s:
+        assert s.con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "2"
+        o = s.con.execute("SELECT value, dt_min, lat, lon, source FROM obs").fetchall()
+        assert o == [(10.5, -7, None, None, "ghcnh:FM15")]
+        assert s.ingested_version("ghcnh", "A/2026") == "etag"
+        assert s.con.execute("SELECT sigma_o FROM variables WHERE name = 't2m'").fetchone()[0] == 1.4
+        assert sum(s.check_integrity().values()) == 0
+        migrated = _layout(s.con)
+    # The upgraded database is indistinguishable from a new one, constraints included.
+    assert migrated == _layout(ObsStore.memory().con)
+    # and the new constraints hold
+    with ObsStore.open(p) as s, pytest.raises(duckdb.ConstraintException):
+        s.con.execute("UPDATE stations SET t_height_m = 50")
+
+
+def test_sensor_heights_are_matched_by_id_wmo_or_icao(store):
+    store.upsert_stations(pd.DataFrame({
+        "station_id": ["GHCNH:A", "GHCNH:B", "GHCNH:C"], "network": "GHCNH", "lat": [40, 41, 42],
+        "lon": [-100, -101, -102], "wmo_id": ["72530", None, None], "icao": [None, "KDEN", None]}))
+    n, unmatched = store.set_sensor_heights(pd.DataFrame({
+        "station_id": [None, None, "GHCNH:C", None], "wmo": ["72530", None, None, "99999"],
+        "icao": [None, "KDEN", None, None], "t_height_m": ["1.5", None, "2.0", "2"],
+        "wind_height_m": ["10", "6.1", None, None]}))
+    assert n == 3 and unmatched == ["99999"]
+    got = store.con.execute("SELECT station_id, t_height_m, wind_height_m FROM stations ORDER BY 1").fetchall()
+    assert got == [("GHCNH:A", 1.5, 10.0), ("GHCNH:B", None, 6.1), ("GHCNH:C", 2.0, None)]
+    with pytest.raises(ValidationError, match="anemometer"):
+        store.set_sensor_heights(pd.DataFrame({"station_id": ["GHCNH:A"], "wind_height_m": [500]}))
+
+
+def test_observation_positions_are_returned_in_place_of_the_station(store, stations):
+    store.upsert_stations(stations)
+    store.upsert_obs(pd.concat([obs(station_id="RAOB:72520", variable="z500", value=5600.0, lat=40.7, lon=-79.5,
+                                    dt_min=-20),
+                                obs(station_id="RAOB:72520", variable="z850", value=1500.0)]))
+    got = store.fetch_obs(["z500", "z850"], "2026-10-13", "2026-10-13").set_index("variable")
+    assert tuple(got.loc["z500", ["lat", "lon", "dt_min"]]) == (40.7, -79.5, -20)
+    assert tuple(got.loc["z850", ["lat", "lon"]]) == (40.53, -80.22)
