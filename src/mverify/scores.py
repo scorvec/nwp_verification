@@ -107,6 +107,41 @@ def vector_wind(pairs: pd.DataFrame, by: list[str]) -> pd.DataFrame:
             else pd.DataFrame(columns=[*by, "n", "rmse", "rmse_oc", "bias"]))
 
 
+STATION_KEY = ["model", "network", "variable", "station_id", "lead_h"]
+
+
+def by_station(pairs: pd.DataFrame) -> pd.DataFrame:
+    """RMSE and bias of each model at each station and lead, for maps: columns ``STATION_KEY``,
+    ``lat``, ``lon``, ``n``, ``rmse``, ``bias``.
+
+    An ensemble is scored through its mean. u/v pairs also give the vector wind (``wind10``,
+    ``wind500`` ...) with the speed bias as its bias, as in ``vector_wind``. The position is
+    where the observations were: the median over the sample, for a drifting balloon.
+    """
+    cols = [*STATION_KEY, "lat", "lon", "n", "rmse", "bias"]
+    if pairs.empty:
+        return pd.DataFrame(columns=cols)
+    one = ["model", "network", "variable", "init", "lead_h", "valid_time", "station_id"]
+    p = pairs
+    if p["member"].notna().any():
+        p = p.groupby(one, dropna=False, sort=False).agg(fcst=("fcst", "mean"), obs=("obs", "first"),
+                                                         lat=("lat", "first"), lon=("lon", "first")).reset_index()
+    p = p[[*one, "lat", "lon", "fcst", "obs"]].assign(err=lambda d: d["fcst"] - d["obs"])
+    parts = [p.assign(se=p["err"] ** 2)]
+    for var_u in sorted(v for v in p["variable"].unique() if v.startswith("u")):
+        u, v = p[p["variable"] == var_u], p[p["variable"] == "v" + var_u[1:]]
+        j = u.merge(v[[k for k in one if k != "variable"] + ["fcst", "obs"]],
+                    on=[k for k in one if k != "variable"], suffixes=("_u", "_v"))
+        if not j.empty:
+            parts.append(j[[k for k in one if k != "variable"] + ["lat", "lon"]].assign(
+                variable="wind" + var_u[1:], se=(j["fcst_u"] - j["obs_u"]) ** 2 + (j["fcst_v"] - j["obs_v"]) ** 2,
+                err=np.hypot(j["fcst_u"], j["fcst_v"]) - np.hypot(j["obs_u"], j["obs_v"])))
+    g = pd.concat(parts, ignore_index=True).groupby(STATION_KEY, sort=True)
+    out = pd.DataFrame({"lat": g["lat"].median(), "lon": g["lon"].median(), "n": g.size(),
+                        "rmse": np.sqrt(g["se"].mean()), "bias": g["err"].mean()})
+    return out.reset_index()[cols]
+
+
 def crps_ensemble(members: np.ndarray, obs: np.ndarray) -> np.ndarray:
     """Fair CRPS of an ensemble (members on axis 1) against observations, per case.
 

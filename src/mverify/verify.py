@@ -25,6 +25,7 @@ class Result:
     table: pd.DataFrame
     inits: dict[str, list[str]] = field(default_factory=dict)
     tests: pd.DataFrame = field(default_factory=pd.DataFrame)  # model-pair p values (mverify.significance)
+    stations: pd.DataFrame = field(default_factory=pd.DataFrame)  # scores per station (scores.by_station)
 
     def scorecard(self) -> dict:
         return scorecard(self.table, self.inits, self.tests)
@@ -36,12 +37,14 @@ class Result:
         for r in results:
             for m, i in r.inits.items():
                 inits.setdefault(m, set()).update(i)
-        frames = [r.table for r in results if not r.table.empty]
-        tests = [r.tests for r in results if not r.tests.empty]
-        return cls(pd.concat([r.pairs for r in results], ignore_index=True),
-                   pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(),
-                   {m: sorted(i) for m, i in inits.items()},
-                   pd.concat(tests, ignore_index=True) if tests else pd.DataFrame())
+        return cls(_cat([r.pairs for r in results]), _cat([r.table for r in results]),
+                   {m: sorted(i) for m, i in inits.items()}, _cat([r.tests for r in results]),
+                   _cat([r.stations for r in results]))
+
+
+def _cat(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    frames = [f for f in frames if not f.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = None,
@@ -147,7 +150,8 @@ def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list
     if not tables:
         return Result(pairs, pd.DataFrame(), inits)
     table = pd.concat(tables, ignore_index=True)
-    return Result(pairs, table.sort_values(by).reset_index(drop=True), inits, pd.concat(tests, ignore_index=True))
+    return Result(pairs, table.sort_values(by).reset_index(drop=True), inits, pd.concat(tests, ignore_index=True),
+                  scores.by_station(pairs))
 
 
 def _score_region(rp: pd.DataFrame, by: list[str]) -> pd.DataFrame:
