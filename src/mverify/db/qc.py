@@ -37,8 +37,9 @@ STUCK_HOURS = {"t2m": 12, "td2m": 18, "msl": 12}
 
 
 def range_check(df: pd.DataFrame) -> pd.Series:
-    lo = df["variable"].map(lambda v: V.CATALOG[v].lo if v in V.CATALOG else -np.inf)
-    hi = df["variable"].map(lambda v: V.CATALOG[v].hi if v in V.CATALOG else np.inf)
+    # astype: mapping an empty column keeps its string dtype, which cannot be compared with values
+    lo = df["variable"].map(lambda v: V.CATALOG[v].lo if v in V.CATALOG else -np.inf).astype(float)
+    hi = df["variable"].map(lambda v: V.CATALOG[v].hi if v in V.CATALOG else np.inf).astype(float)
     return ((df["value"] < lo) | (df["value"] > hi)).astype("uint16") * RANGE
 
 

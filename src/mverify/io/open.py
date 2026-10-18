@@ -48,6 +48,8 @@ INIT = ("init_time", "forecast_reference_time", "reftime", "initial_time", "time
 LEAD = ("step", "lead_time", "forecast_period", "leadtime", "fhr", "forecast_hour", "prediction_timedelta",
         "lead", "fcst_hour")
 VALID = ("valid_time", "time", "times", "xtime", "t")
+# GRIB keys cfgrib copies into the attributes: accumulation start, and the WMO code for messages eccodes cannot name.
+READ_KEYS = ["startStep", "discipline", "parameterCategory", "parameterNumber"]
 
 MODEL_NAMES = ("aifs-ens", "aifs", "ifs-ens", "ifs", "ecmwf", "gefs", "gfs", "hrrr", "rrfs", "nam", "rap",
                "hrdps", "rdps", "gdps", "geps", "icon", "arpege", "arome", "ukmo", "graphcast", "pangu",
@@ -187,21 +189,22 @@ def _open(path: Path, fmt: str) -> list[xr.Dataset]:
             import cfgrib
             starts, instant = _accumulation_starts(path)
             if len(starts) <= 1:
-                return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": "", "read_keys": ["startStep"]})
+                return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": "", "read_keys": READ_KEYS},
+                                             cache=False)
             # Several accumulations of one field (GFS: 0-30 h and 24-30 h) collide in cfgrib, which
             # keeps one silently; open each start separately and everything else once.
             out = list(cfgrib.open_datasets(str(path), backend_kwargs={
-                "indexpath": "", "filter_by_keys": {"stepType": "instant"}})) if instant else []
+                "indexpath": "", "read_keys": READ_KEYS, "filter_by_keys": {"stepType": "instant"}}, cache=False)) if instant else []
             for s in starts:
                 out += cfgrib.open_datasets(str(path), backend_kwargs={
-                    "indexpath": "", "read_keys": ["startStep"],
-                    "filter_by_keys": {"stepType": "accum", "startStep": s}})
+                    "indexpath": "", "read_keys": READ_KEYS,
+                    "filter_by_keys": {"stepType": "accum", "startStep": s}}, cache=False)
             return [ds for ds in out if ds.data_vars]
         if fmt == "netcdf":
             try:
-                return [xr.open_dataset(path, decode_timedelta=True)]
+                return [xr.open_dataset(path, decode_timedelta=True, cache=False)]
             except ValueError:
-                return [xr.open_dataset(path, decode_times=False)]
+                return [xr.open_dataset(path, decode_times=False, cache=False)]
         return [xr.open_zarr(path, consolidated=None, decode_timedelta=True)]
 
 
@@ -355,6 +358,7 @@ def identify(name: str, da: xr.DataArray, has_level: bool) -> str | None:
     low = name.lower()
     attrs = da.attrs
     short = str(attrs.get("GRIB_shortName", "")).lower()
+    code = tuple(attrs.get(f"GRIB_{k}") for k in ("discipline", "parameterCategory", "parameterNumber"))
     tol = attrs.get("GRIB_typeOfLevel")
     std = attrs.get("standard_name", "")
     if has_level:
@@ -371,6 +375,8 @@ def identify(name: str, da: xr.DataArray, has_level: bool) -> str | None:
                 return "orog"
             continue
         if low in (a.lower() for a in v.aliases) or (short and short in v.grib and (tol in (None, v.grib_level))):
+            return v.name
+        if short in ("", "unknown") and code in v.grib2 and tol in (None, v.grib_level):
             return v.name
     if std:
         hag = da.coords.get("heightAboveGround", da.coords.get("height"))

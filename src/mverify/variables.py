@@ -28,6 +28,7 @@ class Var:
     lo: float = -1e9                # physical range for QC, canonical unit
     hi: float = 1e9
     sigma_o: float | None = None    # observation error SD, canonical unit (see SIGMA_O_UPPER)
+    grib2: tuple[tuple[int, int, int], ...] = ()  # WMO (discipline, category, number), for messages eccodes cannot name
 
 
 LEVELS = (1000, 925, 850, 700, 500, 300, 250, 200)
@@ -64,7 +65,7 @@ SURFACE = [
         lo=-90, hi=40, sigma_o=1.6),
     Var("msl", "mean sea-level pressure", "hPa", "surface", grib=("prmsl", "msl", "mslet"),
         grib_level="meanSea", standard_names=("air_pressure_at_mean_sea_level", "air_pressure_at_sea_level"),
-        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=850, hi=1090,
+        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=870, hi=1090,
         sigma_o=1.0),
     Var("u10", "10 m zonal wind", "m s-1", "surface", grib=("10u", "u10"), grib_level="heightAboveGround",
         standard_names=("eastward_wind",), aliases=("u10", "10u", "U10", "uas", "UGRD_10maboveground"),
@@ -93,7 +94,9 @@ STATIC = ("orog", "fsr", "lsm")
 
 # Accumulated precipitation is verified grid-to-grid against analyses (mverify.precip), not
 # against station rows. A field of it covers the lead-time window Field.accum.
+# (0, 1, 8) is total precipitation in kg m-2; eccodes calls it "unknown" in ECCC's GDPS/RDPS files.
 PRECIP = Var("tp", "accumulated precipitation", "mm", "surface", grib=("tp", "apcp"), grib_level="surface",
+             grib2=((0, 1, 8),),
              standard_names=("precipitation_amount", "lwe_thickness_of_precipitation_amount"),
              aliases=("tp", "apcp", "APCP", "APCP_surface", "total_precipitation", "precip_acc"), lo=0, hi=2000)
 GRIDDED = ("tp",)

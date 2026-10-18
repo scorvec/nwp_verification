@@ -184,10 +184,18 @@ to two decimals at every lead.
   spread and spread/skill; the observation-error-aware scores below; bootstrap CIs resampling
   whole valid times (stations at one time are correlated, so resampling stations would
   overstate confidence). Regions: global, NH, tropics, SH, CONUS, North America, Europe.
+* **One sample for all models** (`verify.common_sample`): with several models, each is scored
+  only on the observations every model was matched to at the same init and lead. Models lose
+  different pairs (the terrain cut follows each model's orography, the land-only
+  interpolation its land-sea mask), so without this their scores are not comparable.
+  `--all-pairs` turns it off.
+* **Significance** (`significance.py`): for every ordered pair of models, a paired t-test on
+  the per-run mean squared errors, with the variance inflated for lag-1 autocorrelation of
+  the run-to-run differences (Geer 2016), since runs a day apart share their weather. The
+  p values go into the scorecard JSON as `p`, so a page can colour only differences that
+  hold up.
 * **Planned**: anomaly correlation against station climatologies (the `skewt-climo` medians
-  your AIFS page already uses), categorical scores for precipitation, significance tests for
-  model-vs-model differences (paired, with the same block bootstrap), diurnal-cycle and
-  per-station bias maps.
+  your AIFS page already uses), diurnal-cycle and per-station bias maps.
 
 ### Making observations and the model comparable
 
@@ -238,7 +246,8 @@ so scores can be stratified by any of them.
 Deterministic runs to day 10 and ensembles to day 15 run through the same code. Measured here:
 a GFS 0.25° run 0-240 h every 12 h against the CONUS test database scored in 14 s using 0.9 GB.
 A synthetic 31-member, 1° ensemble 0-360 h every 6 h (7,564 fields, 508k pairs) matched in 23 s
-and scored in 4 s using 2.3 GB. Pairs are held in memory as one long table; for a global
+and scored in 4 s using 2.3 GB. GFS, IFS and AIFS, ten 0.25° runs each to day 10 against 2,200
+stations worldwide and Stage IV: 3.1M pairs in 13 min at a 3.8 GB peak. Pairs are held in memory as one long table; for a global
 station set a 51-member ensemble reaches about 10^8 pairs, so the next step is scoring each
 init and lead as it is matched instead of after.
 
@@ -304,7 +313,7 @@ Recommended wiring, matching how the site's other products are built:
 * a verification page fetches that JSON and draws lead-time curves and a scorecard grid.
 
 This keeps the package independent of the site (anyone can run it) while the site stays a
-consumer, like it is of `quantmet`. Nothing in `scorvec.github.io` has been changed.
+consumer, like it is of `quantmet`. The page is `verification.html` on the site.
 
 ## 6. Code quality
 

@@ -29,7 +29,8 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 Every score also has an observation-error-aware version (`rmse_oc`, `crps_oe`, `ssr_oe`). Radiosonde
 levels are matched where the balloon drifted to. Surface stations more than 100 m from the model terrain
 are left out, coastal stations are matched to land grid points when the files have a land-sea mask, and
-winds from anemometers that are not at 10 m are corrected to 10 m. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
+winds from anemometers that are not at 10 m are corrected to 10 m. Several models are compared on
+the observations they all have, and the scorecard says which differences are significant. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
 
 ## Commands
 

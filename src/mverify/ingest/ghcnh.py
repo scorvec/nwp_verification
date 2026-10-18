@@ -134,6 +134,19 @@ def _fetch(ghcn_id: str, year: int) -> pd.DataFrame:
     return pd.read_parquet(buf, columns=[c for c in COLUMNS if c in names])
 
 
+def select(sl: pd.DataFrame, n: int, cell_deg: float = 2.0) -> pd.DataFrame:
+    """``n`` stations spread over the map: one per ``cell_deg`` box first, then a second per box, and so on.
+    Within a box, stations that also report to WMO and ICAO (the real-time network models are judged on)
+    come first. Taking the first ``n`` of the list instead would fill the sample alphabetically, i.e. with
+    the countries whose codes come first."""
+    rank = sl["ICAO"].isna().astype(int) + sl["WMO_ID"].isna().astype(int)
+    cell = (np.floor(sl["LATITUDE"] / cell_deg).astype("Int64").astype(str) + ","
+            + np.floor(sl["LONGITUDE"] / cell_deg).astype("Int64").astype(str))
+    sl = sl.assign(_rank=rank, _cell=cell).sort_values(["_rank", "GHCN_ID"], kind="stable")
+    sl = sl.assign(_pass=sl.groupby("_cell", sort=False).cumcount())
+    return sl.sort_values(["_pass", "_rank", "GHCN_ID"], kind="stable").head(n).drop(columns=["_rank", "_cell", "_pass"])
+
+
 def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None = None,
            max_stations: int | None = None, cache_dir: Path | None = None, workers: int = 8, progress=print) -> int:
     """Fetch, clean and write GHCNh station-years; unchanged upstream files are skipped. Returns rows written."""
@@ -144,11 +157,8 @@ def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None =
     if bbox:
         lo0, la0, lo1, la1 = bbox
         sl = sl[sl["LONGITUDE"].between(lo0, lo1) & sl["LATITUDE"].between(la0, la1)]
-    # Stations that also report to WMO / ICAO first: the real-time network models are judged on.
-    sl = sl.assign(_rank=sl["ICAO"].isna().astype(int) + sl["WMO_ID"].isna().astype(int))
-    sl = sl.sort_values(["_rank", "GHCN_ID"], kind="stable")
     if max_stations:
-        sl = sl.head(max_stations)
+        sl = select(sl, max_stations)
     meta = sl.set_index("GHCN_ID")
     total = 0
     for year in years:
