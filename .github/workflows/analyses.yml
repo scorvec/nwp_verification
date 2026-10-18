@@ -1,0 +1,55 @@
+name: analyses
+# Fetches one window of every precipitation analysis and checks it reads sensibly, so a change
+# in a provider's file layout or URL shows up here rather than in the nightly database build.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["src/mverify/precip/**", "src/mverify/ingest/http.py", ".github/workflows/analyses.yml"]
+  schedule:
+    - cron: "17 6 * * 1"
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    env:
+      EARTHDATA_USERNAME: ${{ secrets.EARTHDATA_USERNAME }}
+      EARTHDATA_PASSWORD: ${{ secrets.EARTHDATA_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[all]"
+      - name: Fetch and check one window per product
+        run: |
+          python - <<'PY'
+          import os, tempfile
+          from pathlib import Path
+          import numpy as np, pandas as pd
+          from mverify.precip.analyses import PRODUCTS, fetch
+
+          now = pd.Timestamp.now("UTC").tz_localize(None)
+          # A window each product should already have: Stage IV and IMERG Late within days,
+          # GPCP V3.3 only months later.
+          when = {"stageiv": now - pd.Timedelta("3D"), "imerg_late": now - pd.Timedelta("3D"),
+                  "gpcp": pd.Timestamp("2025-12-31")}
+          cache, failed = Path(tempfile.mkdtemp()), []
+          for name, p in PRODUCTS.items():
+              if p.login and not os.environ.get("EARTHDATA_USERNAME"):
+                  print(f"{name}: skipped, EARTHDATA_USERNAME / EARTHDATA_PASSWORD secrets not set")
+                  continue
+              t = p.windows(when[name] - pd.Timedelta("1D"), when[name])[-1]
+              da = fetch(p, t, cache)
+              v = da.values
+              lat = np.broadcast_to(da["latitude"].values[:, None], v.shape) if da["latitude"].ndim == 1 \
+                  else da["latitude"].values
+              w = np.cos(np.deg2rad(lat)) * np.isfinite(v)
+              mean = float(np.nansum(v * w) / w.sum())
+              cover = float(np.isfinite(v).mean())
+              print(f"{name} {t}: shape {v.shape}, covered {cover:.2f}, area mean {mean:.2f} mm, max {np.nanmax(v):.0f}")
+              # Global daily means sit near 2.7 mm; a CONUS day anywhere from dry to very wet.
+              lo, hi = (1.0, 6.0) if name != "stageiv" else (0.0, 20.0)
+              if not (lo <= mean <= hi) or cover < 0.3:
+                  failed.append(name)
+          if failed:
+              raise SystemExit(f"implausible analyses: {failed}")
+          PY
