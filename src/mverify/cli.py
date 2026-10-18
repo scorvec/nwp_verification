@@ -109,6 +109,11 @@ def cmd_db(a) -> int:
             from mverify.ingest import soundings
             n = soundings.ingest(s, root=a.root, since=a.since, bbox=_bbox(a.bbox))
             print(f"{n} rows written")
+        elif a.db_cmd == "igra":
+            from mverify.ingest import igra
+            n = igra.ingest(s, since=a.since, until=a.until, archive=a.archive, bbox=_bbox(a.bbox),
+                            stations=a.id, workers=a.workers)
+            print(f"{n} rows written")
         elif a.db_cmd == "precip":
             from mverify.db.store import db_path
             from mverify.precip import analyses
@@ -177,6 +182,15 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--root", default=None, help="mirror URL or local checkout of the skewt-data branch")
     r.add_argument("--since", help="only ascents at or after this time")
     r.add_argument("--bbox")
+    ig = dsub.add_parser("igra", help="ingest radiosonde mandatory levels from IGRA2 (NCEI), this year or the "
+                         "whole record")
+    ig.add_argument("--archive", choices=["y2d", "por"], default="y2d",
+                    help="y2d: this year's files (daily updates); por: each station's whole record")
+    ig.add_argument("--since", help="only ascents at or after this time")
+    ig.add_argument("--until", help="only ascents at or before this time")
+    ig.add_argument("--bbox")
+    ig.add_argument("--id", nargs="+", help="IGRA2 station ids, e.g. USM00072520")
+    ig.add_argument("--workers", type=int, default=8)
     pr = dsub.add_parser("precip", help="add precipitation analyses (Stage IV over CONUS; GPCP and IMERG Late "
                          "globally, which need EARTHDATA_USERNAME / EARTHDATA_PASSWORD)")
     pr.add_argument("--product", nargs="+", default=["stageiv", "gpcp", "imerg_late"],

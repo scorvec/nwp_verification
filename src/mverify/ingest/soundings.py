@@ -3,7 +3,7 @@
 The mirror (the ``skewt-data`` branch of scorvec/scorvec.github.io) already
 merges WIS2 BUFR, IEM, ECCC, TAC and IGRA feeds for ~700 stations and keeps a
 rolling window of recent ascents as one CSV per station and hour. Here each
-ascent is reduced to the mandatory levels mverify verifies (1000-200 hPa):
+ascent is reduced to the mandatory levels mverify verifies (1000-100 hPa, humidity to 300 hPa):
 an exact level is used when reported, otherwise heights and temperatures are
 interpolated linearly in log-pressure between levels no more than 60 hPa
 apart (winds only from an exact level or levels 25 hPa apart). The vertical
@@ -23,8 +23,8 @@ matching interpolates the model to that point instead of the launch site:
 The time offset is stored but not yet used: the model is taken at the nominal
 hour, as in most operational verification.
 
-IGRA2 (NCEI) is the long archive for the same stations; its parser plugs in
-the same way once NCEI is reachable from the build machine.
+IGRA2 (NCEI, mverify.ingest.igra) is the long archive for the same stations,
+reduced by the same function.
 """
 
 from __future__ import annotations
@@ -47,11 +47,10 @@ log = logging.getLogger(__name__)
 
 MIRROR = "https://raw.githubusercontent.com/scorvec/scorvec.github.io/skewt-data"
 SOURCE = "raob:scorvec-skewt"
-LEVELS = (1000, 925, 850, 700, 500, 300, 250, 200)
 COLS = {"pressure_hPa": "p", "geopotential height_m": "z", "temperature_C": "t",
-        "wind direction_degree": "wd", "wind speed_m/s": "ws", "time": "time", "latitude": "lat",
-        "longitude": "lon"}
-NUMERIC = ("p", "z", "t", "wd", "ws", "lat", "lon")
+        "dew point temperature_C": "td", "wind direction_degree": "wd", "wind speed_m/s": "ws", "time": "time",
+        "latitude": "lat", "longitude": "lon"}
+NUMERIC = ("p", "z", "t", "td", "wd", "ws", "lat", "lon")
 
 ASCENT_RATE = 5.0         # m s-1, typical rise rate of a radiosonde balloon
 LAUNCH_LEAD_MIN = 45.0    # launch this many minutes before the nominal hour (WMO practice)
@@ -59,7 +58,7 @@ MAX_DT_MIN = 180          # per-level times further than this from the nominal h
 EARTH_RADIUS = 6.371e6    # m
 # An ascent never changes once mirrored, so its ingest_log version is the version of the reduction
 # below; bumping it makes the next update re-derive every ascent (2: balloon drift).
-REDUCTION_VERSION = "2"
+REDUCTION_VERSION = "3"  # 3: 400, 150 and 100 hPa, specific humidity
 
 
 def _read(root: str, rel: str) -> bytes:
@@ -131,8 +130,10 @@ def trajectory(prof: pd.DataFrame, t: np.ndarray, u: np.ndarray, v: np.ndarray,
 
 def mandatory_levels(prof: pd.DataFrame, hour: pd.Timestamp | None = None,
                      lat0: float | None = None, lon0: float | None = None) -> pd.DataFrame:
-    """One ascent at the mandatory levels: index ``variable`` (z500, t850, u250 ...), columns
-    ``value`` (canonical unit) and, where the flight could be reconstructed, ``dt_min``, ``lat``, ``lon``."""
+    """One ascent at the mandatory levels: index ``variable`` (z500, t850, u250, q700 ...), columns
+    ``value`` (canonical unit) and, where the flight could be reconstructed, ``dt_min``, ``lat``, ``lon``.
+
+    ``prof`` has the mirror's column names or the short ones they map to (``COLS``)."""
     prof = prof.rename(columns=COLS).reindex(columns=list(COLS.values()))
     for c in NUMERIC:
         prof[c] = pd.to_numeric(prof[c], errors="coerce")
@@ -141,12 +142,14 @@ def mandatory_levels(prof: pd.DataFrame, hour: pd.Timestamp | None = None,
     rad = np.deg2rad(prof["wd"].to_numpy(float))
     ws = prof["ws"].to_numpy(float)
     u, v = -ws * np.sin(rad), -ws * np.cos(rad)
-    series = {"z": (prof["z"].to_numpy(float), 60), "t": (prof["t"].to_numpy(float), 60), "u": (u, 25), "v": (v, 25)}
+    q = V.specific_humidity(prof["td"].to_numpy(float), p)
+    series = {"z": (prof["z"].to_numpy(float), 60), "t": (prof["t"].to_numpy(float), 60), "u": (u, 25), "v": (v, 25),
+              "q": (q, 60)}
 
     t = flight_time(prof, hour) if len(p) else None
     path = trajectory(prof, t, u, v, lat0, lon0) if t is not None and lat0 is not None else None
     rows = []
-    for lev in LEVELS:
+    for lev in V.LEVELS:
         where = {"dt_min": np.nan, "lat": np.nan, "lon": np.nan}
         if t is not None and len(p) and p[-1] <= lev <= p[0]:
             lp = np.log(p[::-1])  # ascending, as np.interp needs
@@ -158,6 +161,8 @@ def mandatory_levels(prof: pd.DataFrame, hour: pd.Timestamp | None = None,
                 where["lon"] = np.rad2deg(np.arctan2(np.interp(np.log(lev), lp, np.sin(rl)),
                                                      np.interp(np.log(lev), lp, np.cos(rl))))
         for var, (x, gap) in series.items():
+            if var == "q" and lev not in V.HUMIDITY_LEVELS:
+                continue
             val = _at_level(p, x, lev, gap)
             if val is not None:
                 rows.append({"variable": f"{var}{lev}", "value": val, **where})

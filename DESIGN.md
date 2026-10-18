@@ -94,7 +94,7 @@ Decisions and why:
 |---|---|---|---|
 | Surface (`GHCNH`) | NOAA GHCNh on AWS (`noaa-ghcnh-pds`), NCEI's successor to ISD | ~15k active stations, METAR + SYNOP + others merged, updated daily (≈3-day lag) | implemented |
 | Upper air (`RAOB`) | the scorvec.com sounding mirror (`skewt-data` branch: WIS2 BUFR, IEM, ECCC, TAC, IGRA) | ~700 stations, rolling recent window, 00/12Z plus intermediate | implemented |
-| Upper air archive | IGRA2 (NCEI) | 1900s to present | planned; NCEI was not reachable from this build machine, the parser plugs into the same ingest |
+| Upper air archive | IGRA2 (NCEI): this year's files (`data-y2d`, updated daily) or each station's whole record (`data-por`) | ~2,800 stations, 1900s to present, ~800 reporting | implemented (`ingest/igra.py`); writes the same rows as the mirror, so either fills the other's gaps |
 | Precipitation | Stage IV, MRMS QPE (AWS), CCPA, IMERG | gridded | planned (section 4) |
 | Surface, real time | METAR/SYNOP (IEM, WIS2) for the 3-day GHCNh lag | | planned |
 | Daily max/min/precip | GHCN-Daily (AWS) | ~100k stations | planned |
@@ -119,7 +119,9 @@ analysis from 15 m to 20 m.
 
 GHCNh reports are reduced to one value per station x variable x whole hour (nearest report
 within ±30 min, routine METAR preferred over SYNOP over SPECI on ties). Radiosondes are reduced
-to the mandatory levels 1000-200 hPa, interpolated in log-pressure only across small gaps.
+to the standard levels 1000-100 hPa, interpolated in log-pressure only across small gaps;
+specific humidity comes from the dew point (Bolton 1980) and only up to 300 hPa, above which
+sonde humidity is too slow and dry-biased to verify a model with.
 
 Planned, in priority order: a background check (observation minus a short-range analysis,
 rejecting only departures far beyond normal model error; the remaining gross radiosonde
@@ -247,9 +249,12 @@ Deterministic runs to day 10 and ensembles to day 15 run through the same code. 
 a GFS 0.25° run 0-240 h every 12 h against the CONUS test database scored in 14 s using 0.9 GB.
 A synthetic 31-member, 1° ensemble 0-360 h every 6 h (7,564 fields, 508k pairs) matched in 23 s
 and scored in 4 s using 2.3 GB. GFS, IFS and AIFS, ten 0.25° runs each to day 10 against 2,200
-stations worldwide and Stage IV: 3.1M pairs in 13 min at a 3.8 GB peak. Pairs are held in memory as one long table; for a global
-station set a 51-member ensemble reaches about 10^8 pairs, so the next step is scoring each
-init and lead as it is matched instead of after.
+stations worldwide and Stage IV: 3.1M pairs in 13 min at a 3.8 GB peak. `verify` holds the pairs in
+memory as one long table. A sample too large for that, such as every pressure level of many runs or a
+51-member ensemble on a global station set (about 10^8 pairs), is matched run by run into Parquet files
+and scored with `score_pair_files`, which reads one variable group at a time (one pressure level, or
+the 10 m wind components together): no score or significance test of one variable needs another's
+pairs.
 
 ## 4. Precipitation analyses (`src/mverify/precip/`)
 
@@ -338,6 +343,7 @@ src/mverify/
   db/qc.py            quality-control checks and flag definitions
   ingest/ghcnh.py     GHCNh hourly surface observations
   ingest/soundings.py radiosonde mandatory levels
+  ingest/igra.py      IGRA2 radiosonde archive, reduced the same way
   io/open.py          format detection and normalisation of model output
   interp.py           grid-to-point interpolation
   match.py            forecast/observation pairing
