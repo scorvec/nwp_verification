@@ -30,6 +30,8 @@ def test_a_model_better_in_every_run_is_significant_and_an_equal_one_is_not():
     assert t.loc[("A", "B"), "p"] < 0.01 and t.loc[("A", "B"), "runs"] == 12
     assert t.loc[("C", "B"), "p"] > 0.05
     assert t.loc[("A", "B"), "p"] == pytest.approx(t.loc[("B", "A"), "p"])
+    assert 0 < t.loc[("A", "B"), "runs_eff"] <= 12
+    assert t.loc[("A", "B"), "runs_eff"] == pytest.approx(t.loc[("B", "A"), "runs_eff"])
 
 
 def test_correlated_runs_count_for_less():
@@ -59,3 +61,6 @@ def test_scorecard_carries_the_p_values():
                            "rmse": 1.0, "n": 150} for m in "AB"])
     card = report.scorecard(table, {}, significance.tests(p))
     assert card["rows"][0]["p"]["A|B"][0] < 0.05 and set(card["rows"][0]["p"]) == {"A|B", "B|A"}
+    # the paired runs, once per pair of models
+    assert card["rows"][0]["runs"] == {"A|B": [5]} and set(card["rows"][0]["runs_eff"]) == {"A|B"}
+    assert 0 < card["rows"][0]["runs_eff"]["A|B"][0] <= 5
