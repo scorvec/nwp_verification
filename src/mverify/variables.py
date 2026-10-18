@@ -1,0 +1,128 @@
+"""Canonical variable catalogue.
+
+Every forecast field and every observation is mapped onto one canonical name
+(``t2m``, ``msl``, ``z500``, ``t850`` ...) in one canonical unit, so matching
+never has to care where a number came from. A forecast variable is recognised
+by any of: its GRIB shortName + level, its CF ``standard_name``, or a common
+netCDF/zarr alias (WRF, CMIP, ERA5, ECMWF open data, GRIB2-to-netCDF names).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+G0 = 9.80665
+
+
+@dataclass(frozen=True)
+class Var:
+    name: str
+    label: str
+    unit: str                       # canonical unit
+    kind: str                       # "surface" or "upper"
+    level: float | None = None      # hPa for upper-air variables
+    grib: tuple[str, ...] = ()      # cfgrib shortNames
+    grib_level: str | None = None   # cfgrib typeOfLevel
+    standard_names: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = field(default=())
+    lo: float = -1e9                # physical range for QC, canonical unit
+    hi: float = 1e9
+
+
+def _upper(base: str, level: int, label: str, unit: str, grib: tuple[str, ...], std: tuple[str, ...],
+           lo: float, hi: float) -> Var:
+    return Var(f"{base}{level}", f"{level} hPa {label}", unit, "upper", float(level), grib,
+               "isobaricInhPa", std, (f"{base}{level}", f"{base.upper()}{level}"), lo, hi)
+
+
+SURFACE = [
+    Var("t2m", "2 m temperature", "degC", "surface", grib=("2t", "t2m"), grib_level="heightAboveGround",
+        standard_names=("air_temperature",),
+        aliases=("t2m", "2t", "T2", "tas", "TMP_2maboveground", "air_temperature_2m", "temperature_2m"),
+        lo=-90, hi=60),
+    Var("td2m", "2 m dew point", "degC", "surface", grib=("2d", "d2m"), grib_level="heightAboveGround",
+        standard_names=("dew_point_temperature",),
+        aliases=("d2m", "2d", "td2m", "TD2", "DPT_2maboveground", "dewpoint_temperature_2m"),
+        lo=-90, hi=40),
+    Var("msl", "mean sea-level pressure", "hPa", "surface", grib=("prmsl", "msl", "mslet"),
+        grib_level="meanSea", standard_names=("air_pressure_at_mean_sea_level", "air_pressure_at_sea_level"),
+        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=850, hi=1090),
+    Var("u10", "10 m zonal wind", "m s-1", "surface", grib=("10u", "u10"), grib_level="heightAboveGround",
+        standard_names=("eastward_wind",), aliases=("u10", "10u", "U10", "uas", "UGRD_10maboveground"),
+        lo=-75, hi=75),
+    Var("v10", "10 m meridional wind", "m s-1", "surface", grib=("10v", "v10"),
+        grib_level="heightAboveGround", standard_names=("northward_wind",),
+        aliases=("v10", "10v", "V10", "vas", "VGRD_10maboveground"), lo=-75, hi=75),
+    Var("ws10", "10 m wind speed", "m s-1", "surface", grib=("10si", "si10"), grib_level="heightAboveGround",
+        standard_names=("wind_speed",), aliases=("si10", "10si", "ws10", "wind_speed_10m", "sfcWind"),
+        lo=0, hi=75),
+    Var("orog", "model orography", "m", "surface", grib=("orog", "z", "hgt"), grib_level="surface",
+        standard_names=("surface_altitude", "surface_geopotential"),
+        aliases=("orog", "HGT_surface", "HGT", "z_sfc", "zs", "terrain", "orography"), lo=-500, hi=9000),
+]
+
+UPPER = [
+    *(_upper("z", lv, "geopotential height", "m", ("gh", "z", "hgt"),
+             ("geopotential_height", "geopotential"), lo, hi)
+      # Limits sit outside the observed extremes (deep polar lows, subtropical highs); gross errors
+      # inside them are left to the hydrostatic check.
+      for lv, lo, hi in [(1000, -700, 700), (925, 150, 1300), (850, 700, 1900), (700, 2150, 3500),
+                         (500, 4400, 6200), (300, 7600, 10000), (250, 8800, 11300), (200, 10000, 12800)]),
+    *(_upper("t", lv, "temperature", "degC", ("t", "tmp"), ("air_temperature",), -100, 50)
+      for lv in (1000, 925, 850, 700, 500, 300, 250, 200)),
+    *(_upper("u", lv, "zonal wind", "m s-1", ("u", "ugrd"), ("eastward_wind",), -120, 120)
+      for lv in (1000, 925, 850, 700, 500, 300, 250, 200)),
+    *(_upper("v", lv, "meridional wind", "m s-1", ("v", "vgrd"), ("northward_wind",), -120, 120)
+      for lv in (1000, 925, 850, 700, 500, 300, 250, 200)),
+]
+
+CATALOG: dict[str, Var] = {v.name: v for v in SURFACE + UPPER}
+
+# Quantities a model may only provide through components: name -> (components, function).
+DERIVED = {"ws10": (("u10", "v10"), lambda u, v: (u**2 + v**2) ** 0.5)}
+
+# Base names of pressure-level fields as they appear in netCDF / zarr files.
+UPPER_ALIASES = {
+    "z": ("z", "gh", "hgt", "zg", "geopotential", "geopotential_height", "height", "phi", "gph"),
+    "t": ("t", "tmp", "ta", "temp", "temperature", "air_temperature", "air"),
+    "u": ("u", "ugrd", "ua", "uwnd", "u_component_of_wind", "eastward_wind"),
+    "v": ("v", "vgrd", "va", "vwnd", "v_component_of_wind", "northward_wind"),
+}
+
+
+def get(name: str) -> Var:
+    return CATALOG[name]
+
+
+def to_canonical(values, unit: str | None, var: Var):
+    """Convert ``values`` (numpy/xarray) from ``unit`` into ``var.unit``.
+
+    When the unit is missing or unrecognised the magnitude decides, which
+    catches the common unlabelled cases (Kelvin, Pa, geopotential in m2 s-2).
+    """
+    u = (unit or "").strip().lower().replace("**", "").replace("^", "")
+    if var.unit == "degC":
+        if u in ("k", "kelvin") or (not u and float(abs(values).max()) > 150):
+            return values - 273.15
+        if u in ("degf", "f", "fahrenheit"):
+            return (values - 32.0) / 1.8
+        return values
+    if var.unit == "hPa":
+        if u in ("pa",) or (not u and float(values.max()) > 5000):
+            return values / 100.0
+        return values
+    if var.unit == "m":
+        if u in ("m2 s-2", "m2/s2", "m2s-2", "m+2 s-2") or ("s-2" in u):
+            return values / G0
+        if u in ("dam", "gpdm"):
+            return values * 10.0
+        if not u and var.level is not None and var.level <= 700 and float(values.max()) > 30000:
+            return values / G0
+        return values
+    if var.unit == "m s-1":
+        if u in ("kt", "knots", "kts"):
+            return values * 0.514444
+        if u in ("km h-1", "km/h"):
+            return values / 3.6
+        return values
+    return values

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mverify"
+version = "0.1.0.dev0"
+description = "Verify weather model output of any format against a ready-made database of cleaned observations"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "xarray>=2024.1",
+    "scipy>=1.10",
+    "duckdb>=1.0",
+    "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+grib = ["cfgrib>=0.9.10", "eccodes>=1.6"]
+netcdf = ["netCDF4>=1.6", "h5netcdf>=1.2"]
+zarr = ["zarr>=2.16"]
+all = ["mverify[grib,netcdf,zarr]"]
+dev = ["mverify[all]", "pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+mverify = "mverify.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mverify = ["db/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110

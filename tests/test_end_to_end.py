@@ -1,0 +1,58 @@
+"""Forecast files -> matched pairs -> scores, with known answers."""
+
+import json
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from mverify import report
+from mverify.cli import main
+from mverify.verify import verify
+
+
+def test_perfect_model_scores_zero_after_height_correction(tmp_path, filled_store, forecast_ds):
+    p = tmp_path / "perfect.nc"
+    forecast_ds.to_netcdf(p)
+    res = verify({"PERFECT": [p]}, filled_store, regions=["conus"])
+    t = res.table.set_index("lead_h")
+    assert (t["n"] == 3).all()
+    assert t["rmse"].max() == pytest.approx(0.0, abs=1e-9)
+    # without the correction the error is the lapse rate times the station height
+    raw = verify({"PERFECT": [p]}, filled_store, regions=["conus"], height_correction=False)
+    assert raw.table["bias"].iloc[0] == pytest.approx(0.0065 * np.mean([500, 300, 1600]))
+
+
+def test_known_bias_and_the_same_answer_from_every_format(tmp_path, filled_store, forecast_ds):
+    warm = forecast_ds.copy()
+    warm["t2m"] = warm["t2m"] + 1.5
+    warm["t2m"].attrs["units"] = "K"
+    warm.to_netcdf(tmp_path / "warm.nc")
+    warm.to_zarr(tmp_path / "warm.zarr")
+    a = verify({"W": [tmp_path / "warm.nc"]}, filled_store, regions=["conus"]).table
+    b = verify({"W": [tmp_path / "warm.zarr"]}, filled_store, regions=["conus"]).table
+    assert a["bias"].to_numpy() == pytest.approx(1.5)
+    pd.testing.assert_frame_equal(a, b)
+
+
+def test_scorecard_json_shape(tmp_path, filled_store, forecast_ds):
+    forecast_ds.to_netcdf(tmp_path / "m.nc")
+    card = verify({"M": [tmp_path / "m.nc"]}, filled_store, regions=["conus", "global"]).scorecard()
+    out = tmp_path / "card.json"
+    report.write_json(card, out)
+    card = json.loads(out.read_text())
+    assert card["models"] == ["M"] and card["leads"] == [0, 6, 12]
+    row = next(r for r in card["rows"] if r["key"] == "ghcnh:t2m:conus")
+    assert row["unit"] == "degC" and len(row["scores"]["M"]["rmse"]) == 3 and row["scores"]["M"]["n"] == [3, 3, 3]
+
+
+def test_cli_score(tmp_path, filled_store, forecast_ds, capsys):
+    db = tmp_path / "obs.duckdb"
+    filled_store.con.execute(f"ATTACH '{db}' AS f")
+    filled_store.con.execute("COPY FROM DATABASE memory TO f")
+    filled_store.con.execute("DETACH f")
+    forecast_ds.to_netcdf(tmp_path / "gfs.nc")
+    assert main(["score", str(tmp_path / "gfs.nc"), "--db", str(db), "--region", "conus",
+                 "--out", str(tmp_path / "s.json")]) == 0
+    assert "GFS" in capsys.readouterr().out
+    assert json.loads((tmp_path / "s.json").read_text())["models"] == ["GFS"]
