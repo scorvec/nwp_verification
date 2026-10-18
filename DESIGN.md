@@ -246,7 +246,8 @@ so scores can be stratified by any of them.
 Deterministic runs to day 10 and ensembles to day 15 run through the same code. Measured here:
 a GFS 0.25° run 0-240 h every 12 h against the CONUS test database scored in 14 s using 0.9 GB.
 A synthetic 31-member, 1° ensemble 0-360 h every 6 h (7,564 fields, 508k pairs) matched in 23 s
-and scored in 4 s using 2.3 GB. Pairs are held in memory as one long table; for a global
+and scored in 4 s using 2.3 GB. GFS, IFS and AIFS, ten 0.25° runs each to day 10 against 2,200
+stations worldwide and Stage IV: 3.1M pairs in 13 min at a 3.8 GB peak. Pairs are held in memory as one long table; for a global
 station set a 51-member ensemble reaches about 10^8 pairs, so the next step is scoring each
 init and lead as it is matched instead of after.
 
