@@ -21,7 +21,7 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 
 | truth | variables | scores |
 |---|---|---|
-| surface stations (GHCNh) | 2 m temperature and dew point, sea-level pressure, 10 m wind (u, v, speed, vector) | bias, MAE, RMSE, error SD, correlation |
+| surface stations (GHCNh) | 2 m temperature and dew point, surface (station-level) pressure, sea-level pressure, 10 m wind (u, v, speed, vector) | bias, MAE, RMSE, error SD, correlation |
 | radiosondes | height, temperature and wind at 1000-100 hPa, specific humidity at 1000-300 hPa | same, plus vector wind RMSE |
 | ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill |
 | precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE |

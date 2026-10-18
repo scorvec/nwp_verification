@@ -74,6 +74,12 @@ SURFACE = [
         grib_level="meanSea", standard_names=("air_pressure_at_mean_sea_level", "air_pressure_at_sea_level"),
         aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=870, hi=1090,
         sigma_o=1.0),
+    # Station-level pressure, against the model's surface pressure with no reduction: only where the model
+    # terrain is within match.MAX_DZ_PRESSURE of the station (mean sea-level pressure is a reduction below
+    # ground that each model and station does its own way).
+    Var("sp", "surface pressure", "hPa", "surface", grib=("sp", "pres"), grib_level="surface",
+        standard_names=("surface_air_pressure",),
+        aliases=("sp", "ps", "PSFC", "PRES_surface", "surface_pressure"), lo=400, hi=1100, sigma_o=0.5),
     Var("u10", "10 m zonal wind", "m s-1", "surface", grib=("10u", "u10"), grib_level="heightAboveGround",
         standard_names=("eastward_wind",), aliases=("u10", "10u", "U10", "uas", "UGRD_10maboveground"),
         lo=-75, hi=75, sigma_o=1.8),

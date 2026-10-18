@@ -13,7 +13,9 @@ Making the two sides comparable:
     Surface pairs with |dz_m| > ``max_dz`` (100 m) are dropped, because there
     the station samples a different climate than the model grid box (valley vs
     ridge, sheltered vs exposed wind) and no lapse rate fixes that. Pairs whose
-    dz_m is unknown (no orography in the files) are kept.
+    dz_m is unknown (no orography in the files) are kept. Surface pressure is
+    compared unadjusted, so its cut is MAX_DZ_PRESSURE (5 m, about 0.6 hPa at
+    sea level) and a pair with unknown dz_m is dropped.
   * sensor height: an anemometer not at 10 m is brought to 10 m with the
     neutral log wind profile, u(10)/u(h) = ln(10/z0)/ln(h/z0), with z0 from the
     model's surface roughness when the file has it, else Z0_DEFAULT. A
@@ -48,6 +50,9 @@ log = logging.getLogger(__name__)
 
 LAPSE = 0.0065       # K m-1
 MAX_DZ = 100.0       # m, largest model-station terrain difference for surface pairs
+# m, the same for surface pressure, which falls ~0.12 hPa per metre near sea level and is not moved to the station
+# height: 5 m keeps the mismatch (<= 0.6 hPa) within the observation error and well below a day-1 forecast error
+MAX_DZ_PRESSURE = 5.0
 T_HEIGHT_RANGE = (1.25, 2.5)  # m, WMO siting range for thermometers
 Z0_DEFAULT = 0.03    # m, roughness of open short grass, the WMO reference exposure
 WIND_10M = ("u10", "v10", "ws10")
@@ -165,7 +170,9 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
             known = np.isfinite(sensor_h)
             o = np.where(known, o * log_wind_factor(np.where(known, sensor_h, 10.0), z0), o)
         ok = np.isfinite(fcst)
-        if surface and max_dz is not None:
+        if var == "sp" and max_dz is not None:
+            ok &= np.abs(dz) <= min(max_dz, MAX_DZ_PRESSURE)  # unknown dz (NaN) is dropped: no height check
+        elif surface and max_dz is not None:
             ok &= ~(np.abs(dz) > max_dz)  # unknown dz (NaN) is kept
         if not ok.any():
             return

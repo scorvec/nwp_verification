@@ -86,3 +86,29 @@ def test_coastal_stations_take_the_forecast_from_land_points(tmp_path, store, in
     assert p.loc["GHCNH:COAST", "fcst"] == pytest.approx(20.0)  # bilinear would give 16
     assert p.loc["GHCNH:COAST", "land_frac"] == pytest.approx(0.6)
     assert p.loc["GHCNH:INLAND", "land_frac"] == 1.0
+
+
+def test_surface_pressure_only_where_the_model_terrain_is_within_a_few_metres(tmp_path, store, init):
+    # Terrain 0 m; stations at 3, 8 and 40 m. Surface pressure is not moved to the station height, so only the
+    # 3 m station is close enough; 2 m temperature keeps all three under the general 100 m cut.
+    store.upsert_stations(pd.DataFrame({
+        "station_id": ["GHCNH:A", "GHCNH:B", "GHCNH:C"], "network": "GHCNH",
+        "lat": [40.2, 41.2, 42.2], "lon": [-100.3, -100.3, -100.3], "elev_m": [3.0, 8.0, 40.0]}))
+    _grid_ds(init, sp=(lambda la, lo: np.full(la.shape, 101000.0), {"units": "Pa"}, False),
+             t2m=(lambda la, lo: np.full(la.shape, 283.15), {"units": "K"}, False),
+             orog=(lambda la, lo: np.zeros(la.shape), {"units": "m"}, True)).to_netcdf(tmp_path / "p.nc")
+    store.upsert_obs(pd.DataFrame([{"station_id": s, "valid_time": init, "variable": v, "value": x, "source": "test"}
+                                   for s in ("GHCNH:A", "GHCNH:B", "GHCNH:C") for v, x in (("sp", 1009.6), ("t2m", 10.0))]))
+    p = M.match(open_forecast(tmp_path / "p.nc", init=init), store)
+    assert sorted(p.loc[p["variable"] == "sp", "station_id"]) == ["GHCNH:A"]
+    assert p.loc[p["variable"] == "sp", "fcst"].iloc[0] == pytest.approx(1010.0)
+    assert sorted(p.loc[p["variable"] == "t2m", "station_id"]) == ["GHCNH:A", "GHCNH:B", "GHCNH:C"]
+
+
+def test_surface_pressure_without_model_terrain_is_left_out(tmp_path, store, init):
+    store.upsert_stations(pd.DataFrame({"station_id": ["GHCNH:A"], "network": "GHCNH", "lat": [40.2],
+                                        "lon": [-100.3], "elev_m": [0.0]}))
+    _grid_ds(init, sp=(lambda la, lo: np.full(la.shape, 101000.0), {"units": "Pa"}, False)).to_netcdf(tmp_path / "q.nc")
+    store.upsert_obs(pd.DataFrame([{"station_id": "GHCNH:A", "valid_time": init, "variable": "sp", "value": 1010.0,
+                                    "source": "test"}]))
+    assert M.match(open_forecast(tmp_path / "q.nc", init=init), store).empty

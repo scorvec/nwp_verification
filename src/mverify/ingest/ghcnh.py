@@ -37,6 +37,7 @@ FIELDS = {  # GHCNh column -> canonical variable
     "temperature": "t2m",
     "dew_point_temperature": "td2m",
     "sea_level_pressure": "msl",
+    "station_level_pressure": "sp",
 }
 REPORT_PRIORITY = {"FM15": 0, "FM-15": 0, "FM12": 1, "FM-12": 1, "FM16": 2, "FM-16": 2}
 BAD_LEGACY = {"2", "3", "6", "7"}

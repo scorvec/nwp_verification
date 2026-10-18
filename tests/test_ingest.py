@@ -209,3 +209,9 @@ def test_a_limited_station_sample_is_spread_over_the_map():
     # one per 2-degree box first (the WMO/ICAO station in a box before the others), then the rest
     assert ghcnh.select(sl, 2)["GHCN_ID"].tolist() == ["AA1", "ZZ1"]
     assert ghcnh.select(sl, 3)["GHCN_ID"].tolist() == ["AA1", "ZZ1", "AA3"]
+
+
+def test_ghcnh_station_level_pressure_is_surface_pressure():
+    raw = ghcnh_frame([{"DATE": "2026-10-13T12:00:00", "station_level_pressure": 951.3, "sea_level_pressure": 1012.0}])
+    out = ghcnh.parse(raw, "GHCNH:X").set_index("variable")["value"]
+    assert out["sp"] == 951.3 and out["msl"] == 1012.0

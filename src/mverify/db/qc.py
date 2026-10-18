@@ -31,9 +31,9 @@ FLAGS = {
 }
 
 # Largest plausible one-hour departure of a value from both of its neighbours.
-SPIKE_LIMIT = {"t2m": 8.0, "td2m": 10.0, "msl": 6.0, "u10": 25.0, "v10": 25.0, "ws10": 25.0}
+SPIKE_LIMIT = {"t2m": 8.0, "td2m": 10.0, "msl": 6.0, "sp": 6.0, "u10": 25.0, "v10": 25.0, "ws10": 25.0}
 # Hours a value may repeat exactly before the sensor is presumed stuck.
-STUCK_HOURS = {"t2m": 12, "td2m": 18, "msl": 12}
+STUCK_HOURS = {"t2m": 12, "td2m": 18, "msl": 12, "sp": 12}
 
 
 def range_check(df: pd.DataFrame) -> pd.Series:

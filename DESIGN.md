@@ -218,7 +218,11 @@ so scores can be stratified by any of them.
 * **Terrain** (`match.py`). `dz_m` is model terrain minus station elevation. 2 m temperature is
   moved to the station height at 6.5 K/km, and every surface pair with |dz_m| > 100 m is
   dropped (`--max-dz`): there the station samples a valley or a ridge the model does not
-  resolve, and no lapse rate fixes that.
+  resolve, and no lapse rate fixes that. Surface pressure is compared with the station-level
+  pressure as it is, with no reduction (sea-level pressure is a reduction below ground that every
+  model and station makes its own way); it falls about 0.12 hPa per metre near sea level, so its
+  pairs need |dz_m| <= 5 m (`MAX_DZ_PRESSURE`, at most 0.6 hPa, within the observation error),
+  and a pair with unknown terrain is dropped.
 * **Resolution** (`coarsen.py`, `--grid DEG`). Interpolated from its own grid, a finer model
   carries small-scale detail whose position errors count twice (the double penalty), and a model
   published on a grid finer than its own resolution looks sharper than it is. With a common grid,
@@ -240,7 +244,7 @@ so scores can be stratified by any of them.
   `mverify db sensors FILE` (columns: `station_id`, `wmo` or `icao`, plus `t_height_m` and/or
   `wind_height_m`); unknown heights are assumed standard.
 * **Observation error**. `sigma_o` per variable (instrument plus representativeness error;
-  t2m 1.4 K, td2m 1.6 K, MSLP 1.0 hPa, 10 m wind components 1.8 m/s; radiosonde temperature
+  t2m 1.4 K, td2m 1.6 K, surface pressure 0.5 hPa, MSLP 1.0 hPa, 10 m wind components 1.8 m/s; radiosonde temperature
   0.8-1.2 K, height 5 m at 1000 hPa to 14 m at 200 hPa, wind components 1.8-2.6 m/s) is an
   approximate starting point of the size global data assimilation assigns to these observation
   types, not a measured value. It should be replaced by estimates from the database itself
