@@ -117,3 +117,29 @@ def test_a_time_column_holding_only_the_launch_time_is_not_a_flight_time():
 def test_drift_across_the_dateline():
     lev = soundings.mandatory_levels(_ascent(), pd.Timestamp("2026-10-13 12:00"), 0.0, 179.9)
     assert -180 <= lev.loc["z200", "lon"] < -179.5
+
+
+def test_downloads_retry_a_body_cut_off_mid_transfer(monkeypatch):
+    import http.client
+
+    from mverify.ingest import http as H
+
+    class Body:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            if self.fail:
+                raise http.client.IncompleteRead(b"x", 10)
+            return b"whole"
+
+    calls = []
+    monkeypatch.setattr(H.urllib.request, "urlopen", lambda url, timeout: calls.append(url) or Body(len(calls) == 1))
+    monkeypatch.setattr(H.time, "sleep", lambda s: None)
+    assert H.get("https://example.invalid/f") == b"whole" and len(calls) == 2

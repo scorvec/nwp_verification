@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import http.cookiejar
 import netrc
 import os
@@ -45,7 +46,8 @@ def get(url: str, retries: int = 3, timeout: int = 120,
         except urllib.error.HTTPError as e:
             if e.code == 404 or attempt == retries:
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
+            # IncompleteRead: the server closed the connection mid-body (seen on the IEM archive)
             if attempt == retries:
                 raise
         time.sleep(2 ** attempt)
