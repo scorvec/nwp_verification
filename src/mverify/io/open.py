@@ -187,21 +187,22 @@ def _open(path: Path, fmt: str) -> list[xr.Dataset]:
             import cfgrib
             starts, instant = _accumulation_starts(path)
             if len(starts) <= 1:
-                return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": "", "read_keys": ["startStep"]})
+                return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": "", "read_keys": ["startStep"]},
+                                             cache=False)
             # Several accumulations of one field (GFS: 0-30 h and 24-30 h) collide in cfgrib, which
             # keeps one silently; open each start separately and everything else once.
             out = list(cfgrib.open_datasets(str(path), backend_kwargs={
-                "indexpath": "", "filter_by_keys": {"stepType": "instant"}})) if instant else []
+                "indexpath": "", "filter_by_keys": {"stepType": "instant"}}, cache=False)) if instant else []
             for s in starts:
                 out += cfgrib.open_datasets(str(path), backend_kwargs={
                     "indexpath": "", "read_keys": ["startStep"],
-                    "filter_by_keys": {"stepType": "accum", "startStep": s}})
+                    "filter_by_keys": {"stepType": "accum", "startStep": s}}, cache=False)
             return [ds for ds in out if ds.data_vars]
         if fmt == "netcdf":
             try:
-                return [xr.open_dataset(path, decode_timedelta=True)]
+                return [xr.open_dataset(path, decode_timedelta=True, cache=False)]
             except ValueError:
-                return [xr.open_dataset(path, decode_times=False)]
+                return [xr.open_dataset(path, decode_times=False, cache=False)]
         return [xr.open_zarr(path, consolidated=None, decode_timedelta=True)]
 
 

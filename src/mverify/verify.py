@@ -82,8 +82,23 @@ def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list
     inits = {fc.name: sorted({f.init.strftime("%Y-%m-%dT%H") for f in fc.fields}) for fc in fcs}
     if pairs.empty:
         return Result(pairs, pd.DataFrame(), inits)
-    rp = scores.assign_regions(pairs, regions or list(scores.REGIONS))
     by = ["model", "network", "variable", "region", "lead_h"]
+    tables, tests = [], []
+    # One region at a time: a pair belongs to several (global, NH, CONUS, North America), and
+    # holding every copy at once multiplies the memory of a long or multi-model run.
+    for region in regions or list(scores.REGIONS):
+        rp = scores.assign_regions(pairs, [region])
+        if rp.empty:
+            continue
+        tables.append(_score_region(rp, by))
+        tests.append(significance.tests(rp))
+    if not tables:
+        return Result(pairs, pd.DataFrame(), inits)
+    table = pd.concat(tables, ignore_index=True)
+    return Result(pairs, table.sort_values(by).reset_index(drop=True), inits, pd.concat(tests, ignore_index=True))
+
+
+def _score_region(rp: pd.DataFrame, by: list[str]) -> pd.DataFrame:
     det_pairs = rp
     if rp["member"].notna().any():  # deterministic scores of an ensemble are those of its mean
         keys = ["model", "network", "variable", "region", "lead_h", "init", "valid_time", "station_id"]
@@ -100,4 +115,4 @@ def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list
                 base = c[:-4]
                 table[base] = table[base].fillna(table[c])
                 table = table.drop(columns=c)
-    return Result(pairs, table.sort_values(by).reset_index(drop=True), inits, significance.tests(rp))
+    return table
