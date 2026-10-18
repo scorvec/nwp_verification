@@ -60,7 +60,8 @@ def station_list(cache_dir: Path) -> pd.DataFrame:
     for c in ("lat", "lon", "elev_m", "last_year"):
         sl[c] = pd.to_numeric(sl[c], errors="coerce")
     sl.loc[sl["elev_m"] < -998, "elev_m"] = np.nan  # -998.8: unknown, -999.9: missing
-    return sl.dropna(subset=["lat", "lon"])
+    # Ships and other mobile platforms are listed at -98.8888: they have no station position to verify at.
+    return sl[sl["lat"].between(-90, 90) & sl["lon"].between(-180, 180)]
 
 
 def listing(archive: str) -> dict[str, tuple[str, str]]:
