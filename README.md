@@ -30,7 +30,9 @@ Every score also has an observation-error-aware version (`rmse_oc`, `crps_oe`, `
 levels are matched where the balloon drifted to. Surface stations more than 100 m from the model terrain
 are left out, coastal stations are matched to land grid points when the files have a land-sea mask, and
 winds from anemometers that are not at 10 m are corrected to 10 m. Several models are compared on
-the observations they all have, and the scorecard says which differences are significant. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
+the observations they all have, and the scorecard says which differences are significant; with `--grid DEG`
+every model is first averaged onto one regular grid, so models of different resolution are compared from
+cells of the same size. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
 
 ## Commands
 

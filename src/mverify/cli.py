@@ -74,7 +74,7 @@ def cmd_score(a) -> int:
         res = verify(_models(a.paths), store, regions=a.region, variables=a.var, networks=a.network,
                      height_correction=not a.no_height_correction, init=a.init, max_dz=a.max_dz,
                      t_height_range=None if a.any_thermometer_height else T_HEIGHT_RANGE,
-                     common=not a.all_pairs)
+                     common=not a.all_pairs, grid=a.grid)
     if res.table.empty:
         print("no forecast/observation pairs: check the valid times and region against `mverify db status`")
         return 1
@@ -165,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="keep t2m/td2m from thermometers outside the 1.25-2.5 m siting range")
     p.add_argument("--all-pairs", action="store_true",
                    help="score each model on all of its own pairs, not only the ones every model has")
+    p.add_argument("--grid", type=float, metavar="DEG",
+                   help="average every model onto one regular DEG-degree grid before matching, so models of "
+                        "different resolution are compared from cells of the same size (e.g. 0.5)")
     p.set_defaults(fn=cmd_score)
 
     p = sub.add_parser("db", help="build and inspect the observation database")

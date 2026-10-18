@@ -12,6 +12,7 @@ import pyarrow.dataset as ds
 
 from mverify import scores, significance
 from mverify import variables as V
+from mverify.coarsen import coarsen
 from mverify.db.store import ObsStore
 from mverify.io.open import Forecast, open_forecast
 from mverify.match import MAX_DZ, T_HEIGHT_RANGE, match
@@ -51,7 +52,7 @@ def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = Non
            regions: list[str] | None = None, variables: list[str] | None = None,
            networks: list[str] | None = None, height_correction: bool = True, init=None,
            max_dz: float | None = MAX_DZ, t_height_range: tuple[float, float] | None = T_HEIGHT_RANGE,
-           common: bool = True) -> Result:
+           common: bool = True, grid: float | None = None) -> Result:
     """Score one or more models.
 
     ``forecasts`` is a path / glob / list of paths (one model, named from the
@@ -59,6 +60,8 @@ def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = Non
     defaults to every region in mverify.scores.REGIONS that holds pairs. ``max_dz`` and
     ``t_height_range`` are passed to mverify.match.match (None keeps every pair). With several
     models, ``common`` scores each only on the pairs every model has (see ``common_sample``).
+    ``grid`` (degrees) first averages every model onto that one regular grid (mverify.coarsen), so
+    models of different resolution are interpolated to the stations from cells of the same size.
     """
     own = store is None
     store = store or ObsStore.open(read_only=True)
@@ -67,6 +70,8 @@ def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = Non
             fcs = [open_forecast(p, name=n, init=init) for n, p in forecasts.items()]
         else:
             fcs = [open_forecast(forecasts, init=init)]
+        if grid is not None:
+            fcs = [coarsen(fc, grid) for fc in fcs]
         pairs = pd.concat([match(fc, store, variables, networks=networks, height_correction=height_correction,
                                  max_dz=max_dz, t_height_range=t_height_range)
                            for fc in fcs], ignore_index=True)
