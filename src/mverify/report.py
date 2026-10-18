@@ -29,6 +29,7 @@ import math
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from mverify import __version__
@@ -133,6 +134,37 @@ def station_map(stations: pd.DataFrame, leads: list[float] | None = None, variab
     return {"generated": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"),
             "package": f"mverify {__version__}", "models": models,
             "leads": [int(x) if float(x).is_integer() else x for x in leads], "layers": layers}
+
+
+def precip_maps(maps: dict) -> dict:
+    """Per-cell precipitation scores (``mverify.precip.maps.cell_scores``, one Dataset per model) as JSON for a map:
+
+        {"product": "stageiv", "truth": ..., "accum_hours": 24, "fdr_q": 0.1, "min_days": 8,
+         "groups": [{"label": "days 1-2", "ends_h": [36, 60]}, ...],
+         "models": {"GFS": {"lat": [...], "lon": [...], "bias": [[per cell] per group], "rmse": ..., "obs": ...,
+                            "fcst": ..., "days": ..., "significant": ...}}}
+
+    Amounts are tenths of a millimetre per window as integers, cells row by row from the first latitude, None where
+    the cell has no score; ``significant`` is 1 where the bias passes the false-discovery-rate procedure."""
+    first = next(iter(maps.values()))
+    out = {"product": first.attrs["product"], "truth": TRUTH.get(first.attrs["product"].upper(), ("", ""))[1],
+           "accum_hours": first.attrs["accum_hours"], "fdr_q": first.attrs["fdr_q"],
+           "min_days": first.attrs["min_days"],
+           "groups": [{"label": str(g), "ends_h": e} for g, e in zip(first.group.values, first.attrs["window_ends_h"],
+                                                                      strict=True)],
+           "models": {}}
+
+    def tenths(a):
+        return [[None if not np.isfinite(v) else int(np.rint(10 * v)) for v in g.ravel()] for g in a]
+
+    for model, m in maps.items():
+        out["models"][model] = {
+            "lat": [round(float(x), 4) for x in m.lat.values], "lon": [round(float(x), 4) for x in m.lon.values],
+            **{k: tenths(m[k].values) for k in ("bias", "rmse", "obs", "fcst")},
+            "days": [g.ravel().tolist() for g in m["days"].values],
+            "significant": [g.ravel().astype(int).tolist() for g in m["significant"].values],
+        }
+    return out
 
 
 def write_json(card: dict, path: str | Path) -> None:

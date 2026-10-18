@@ -24,7 +24,7 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 | surface stations (GHCNh) | 2 m temperature and dew point, surface (station-level) pressure, sea-level pressure, 10 m wind (u, v, speed, vector) | bias, MAE, RMSE, error SD, correlation |
 | radiosondes | height, temperature and wind at 1000-100 hPa, specific humidity at 1000-300 hPa | same, plus vector wind RMSE |
 | ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill |
-| precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE |
+| precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE; per-cell maps of bias and RMSE, the bias tested cell by cell (`precip/maps.py`) |
 
 Every score also has an observation-error-aware version (`rmse_oc`, `crps_oe`, `ssr_oe`). Radiosonde
 levels are matched where the balloon drifted to. Surface stations more than 100 m from the model terrain

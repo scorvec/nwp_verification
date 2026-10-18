@@ -61,6 +61,16 @@ class Regridder:
         self.cell = np.where(ok, i * nx + np.minimum(j, nx - 1), -1)
         self.w = np.cos(np.deg2rad(slat)) * ok
 
+    def coverage(self, values: np.ndarray) -> np.ndarray:
+        """When coarsening: the share of each analysis cell's source points that hold a value (0 where none fall)."""
+        v = np.asarray(values, float).ravel()
+        n = self.dst_shape[0] * self.dst_shape[1]
+        inside = self.cell >= 0
+        total = np.bincount(self.cell[inside], minlength=n)
+        valid = np.bincount(self.cell[inside & np.isfinite(v)], minlength=n)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(total > 0, valid / total, 0.0).reshape(self.dst_shape)
+
     def __call__(self, values: np.ndarray) -> np.ndarray:
         v = np.asarray(values, float).ravel()
         if not self.coarsen:
