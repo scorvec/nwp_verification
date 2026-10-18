@@ -46,13 +46,13 @@ month of 2 m temperature downloads only that month's 2 m temperature. That is wh
 mirror (the schema is plain SQL apart from a few DuckDB types), but a server is not required for
 anyone.
 
-### Schema (`src/mverify/db/schema.sql`, version 1)
+### Schema (`src/mverify/db/schema.sql`, version 2)
 
 | table | one row per | notes |
 |---|---|---|
-| `obs` | station x valid hour x variable | `value` in canonical units, `qc` bitmask, `dt_min` report offset, `source` |
-| `stations` | station | network-qualified id (`GHCNH:USW00094846`, `RAOB:72520`), lat/lon/elevation, WMO/ICAO ids |
-| `variables` | canonical variable | unit, kind, level, physical limits; generated from `mverify.variables` |
+| `obs` | station x valid hour x variable | `value` in canonical units, `qc` bitmask, `dt_min` observation time minus valid hour, `lat`/`lon` where it was observed when that is not the station (a drifting balloon), `source` |
+| `stations` | station | network-qualified id (`GHCNH:USW00094846`, `RAOB:72520`), lat/lon/elevation, thermometer and anemometer heights, WMO/ICAO ids |
+| `variables` | canonical variable | unit, kind, level, physical limits, observation error `sigma_o`; generated from `mverify.variables` |
 | `qc_flags` | QC check | bit, name, description; the database documents its own flags |
 | `ingest_log` | upstream object | source, key, upstream version (ETag), rows in/kept, time |
 | `grids` | gridded truth field | catalogue of precipitation analyses stored as Zarr |
@@ -81,6 +81,12 @@ Decisions and why:
   radiosonde ascents are upserted by key. `ingest_log.version` holds the upstream ETag, so a
   daily update re-fetches only files that changed.
 * **Times are UTC, longitudes -180..180, units canonical**, and the store enforces all three.
+* **Migrations rebuild, so an upgraded database equals a new one.** `ObsStore` upgrades an older
+  file when it opens it writable (`mverify db init`), in one transaction. DuckDB cannot add a
+  CHECK to an existing table, so a step that changes constraints renames the old table, creates
+  the current one from `schema.sql` and copies rows by column name (`db/migrations.py`). The tests
+  build a v1 file and assert that the upgraded columns and constraints match a fresh database
+  exactly. Upgrading the 5.9M-row test database took 3 s.
 
 ### Sources
 
@@ -138,7 +144,7 @@ A scheduled GitHub Actions workflow in the package repository:
 
 1. restores the build database from the previous snapshot,
 2. runs `mverify db ghcnh --year <this year>` and `mverify db soundings` (both skip unchanged
-   upstream objects),
+   upstream objects; an ascent is re-derived when `soundings.REDUCTION_VERSION` changes),
 3. runs `check_integrity()` and the test suite; any non-zero count fails the job and nothing
    is published,
 4. exports the snapshot and uploads only changed partitions (current month for most days).
@@ -153,10 +159,13 @@ A scheduled GitHub Actions workflow in the package repository:
 * **Times**: cfgrib time/step; netCDF/Zarr init+lead, init+valid, or valid alone with the init
   from attributes (WRF `START_DATE` etc.) or the file name; `--init` overrides.
 * **Grids**: regular lat/lon in either longitude convention and latitude order, or curvilinear
-  2-D lat/lon (Lambert, polar stereographic, rotated, WRF). Orography found in any file is
-  attached to every field on the same grid.
-* **Ensembles**: member dimensions (`number`, `member`, `realization` ...).
-* **Laziness**: fields load one at a time, so a season of 0.25° output never sits in memory.
+  2-D lat/lon (Lambert, polar stereographic, rotated, WRF). Static fields found in any file
+  (orography, land-sea mask, surface roughness) are attached to every field on the same grid,
+  so they can come from a separate file.
+* **Ensembles**: member dimensions (`number`, `member`, `realization` ...). The members of one
+  time step are read together, because ensemble files store them in one chunk; reading them one
+  by one made a 15-day, 31-member run 3.6x slower.
+* **Laziness**: one time step loads at a time, so a season of 0.25° output never sits in memory.
 
 Verified on real data: one GFS 0.25° run read as GRIB2, as netCDF with CF names (`tas`, `psl`,
 `uas`) and as Zarr with -180..180 longitudes and south-to-north latitudes gives identical scores
@@ -167,17 +176,71 @@ to two decimals at every lead.
 * **Interpolation** (`interp.py`): bilinear on regular grids (periodic when global), 4-point
   inverse distance on curvilinear grids; weights are computed once per grid and station set.
   Stations outside a regional domain drop out.
-* **Pairing** (`match.py`): exact valid hour against `obs`; 2 m temperature moved from model
-  terrain to station height at 6.5 K/km when orography is known (`dz_m` is kept per pair);
-  10 m wind speed derived from u/v when needed.
+* **Pairing** (`match.py`): exact valid hour against `obs`; 10 m wind speed derived from u/v
+  when needed. The adjustments that make a point observation and a grid box comparable are
+  in the next section.
 * **Scores** (`scores.py`): n, bias, MAE, RMSE, error SD, correlation; vector wind RMSE; for
-  ensembles fair CRPS, ensemble-mean RMSE, spread and spread/skill; bootstrap CIs resampling
+  ensembles fair CRPS (computed from sorted members, O(m log m) per case), ensemble-mean RMSE,
+  spread and spread/skill; the observation-error-aware scores below; bootstrap CIs resampling
   whole valid times (stations at one time are correlated, so resampling stations would
   overstate confidence). Regions: global, NH, tropics, SH, CONUS, North America, Europe.
 * **Planned**: anomaly correlation against station climatologies (the `skewt-climo` medians
   your AIFS page already uses), categorical scores for precipitation, significance tests for
   model-vs-model differences (paired, with the same block bootstrap), diurnal-cycle and
   per-station bias maps.
+
+### Making observations and the model comparable
+
+Each pair keeps what was done to it (`dz_m`, `dt_min`, `sensor_h_m`, `land_frac`, `sigma_o`),
+so scores can be stratified by any of them.
+
+* **Balloon drift** (`ingest/soundings.py`). A sonde reaches 200 hPa about 40 minutes after
+  launch and drifts tens of km, over 100 km in a jet. Each level is stored with where and when
+  it was measured: per-level times when the ascent carries them (WIS2 BUFR and ECCC, about 80%
+  of the mirror), otherwise a launch 45 minutes before the nominal hour and a 5 m/s ascent;
+  per-level positions when they vary (GPS sondes), otherwise the reported winds integrated over
+  time from the launch site. Matching interpolates the model to the drifted point. Over the
+  4,708 mirrored ascents the median drift is 1.4 km at 850 hPa, 7.7 km at 500 hPa and 28 km at
+  200 hPa (95th percentile 71 km). The time offset is stored but the model is taken at the
+  nominal hour, as in most operational verification; interpolating between output times is a
+  later step. On one GFS run, using the drifted position lowered the 250 hPa vector wind RMSE at
+  42 h from 5.68 to 5.26 m/s; heights barely change because they vary slowly in space.
+* **Terrain** (`match.py`). `dz_m` is model terrain minus station elevation. 2 m temperature is
+  moved to the station height at 6.5 K/km, and every surface pair with |dz_m| > 100 m is
+  dropped (`--max-dz`): there the station samples a valley or a ridge the model does not
+  resolve, and no lapse rate fixes that.
+* **Coastlines**. With a land-sea mask in the files (GFS `LAND`, ECMWF `lsm`, CMIP `sftlf`),
+  surface variables at stations are interpolated from land grid points only, so a coastal
+  station is not handed the sea's temperature or wind, and a station with no land point among
+  its neighbours is dropped. The model land fraction at the station is kept in `land_frac`.
+* **Sensor heights**. Thermometers outside the WMO 1.25-2.5 m siting range are excluded
+  (`--any-thermometer-height` keeps them); within it the height is kept for stratification.
+  Winds from an anemometer not at 10 m are brought to 10 m with the neutral log profile
+  u(10)/u(h) = ln(10/z0)/ln(h/z0), with z0 from the model's roughness field when the files carry
+  it, else 0.03 m (WMO open-terrain reference). No automatic source of sensor heights is
+  reachable (OSCAR/Surface is blocked here), so heights are loaded from a CSV with
+  `mverify db sensors FILE` (columns: `station_id`, `wmo` or `icao`, plus `t_height_m` and/or
+  `wind_height_m`); unknown heights are assumed standard.
+* **Observation error**. `sigma_o` per variable (instrument plus representativeness error;
+  t2m 1.4 K, td2m 1.6 K, MSLP 1.0 hPa, 10 m wind components 1.8 m/s; radiosonde temperature
+  0.8-1.2 K, height 5 m at 1000 hPa to 14 m at 200 hPa, wind components 1.8-2.6 m/s) is an
+  approximate starting point of the size global data assimilation assigns to these observation
+  types, not a measured value. It should be replaced by estimates from the database itself
+  (Desroziers et al. 2005 diagnostics against a reanalysis). The raw scores stay the headline
+  numbers; next to them `rmse_oc` = sqrt(max(MSE - sigma_o^2, 0)) (vector wind removes the
+  variance of both components), and for ensembles `crps_oe`, the CRPS of members perturbed with
+  seeded N(0, sigma_o) noise (Saetra et al. 2004), `spread_oe` = sqrt(spread^2 + sigma_o^2) and
+  `ssr_oe` = spread_oe / RMSE of the mean, which is 1 for a calibrated ensemble (a test draws one
+  and checks this).
+
+### Lead times and scale
+
+Deterministic runs to day 10 and ensembles to day 15 run through the same code. Measured here:
+a GFS 0.25° run 0-240 h every 12 h against the CONUS test database scored in 14 s using 0.9 GB.
+A synthetic 31-member, 1° ensemble 0-360 h every 6 h (7,564 fields, 508k pairs) matched in 23 s
+and scored in 4 s using 2.3 GB. Pairs are held in memory as one long table; for a global
+station set a 51-member ensemble reaches about 10^8 pairs, so the next step is scoring each
+init and lead as it is matched instead of after.
 
 ## 4. Precipitation analyses (planned)
 
@@ -223,6 +286,7 @@ consumer, like it is of `quantmet`. Nothing in `scorvec.github.io` has been chan
 src/mverify/
   variables.py        canonical variable catalogue and unit conversion
   db/schema.sql       the database schema
+  db/migrations.py    upgrades of older databases to the current schema
   db/store.py         ObsStore: validated, atomic writes; queries; integrity audit; snapshots
   db/qc.py            quality-control checks and flag definitions
   ingest/ghcnh.py     GHCNh hourly surface observations
@@ -234,6 +298,6 @@ src/mverify/
   report.py           scorecard JSON and tables
   verify.py           one-call API
   cli.py              command line
-tests/                pytest suite
+tests/                pytest suite (tests/data: the v1 schema, for the migration test)
 examples/             helper scripts (GFS subset download)
 ```

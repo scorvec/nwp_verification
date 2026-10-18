@@ -27,39 +27,69 @@ class Var:
     aliases: tuple[str, ...] = field(default=())
     lo: float = -1e9                # physical range for QC, canonical unit
     hi: float = 1e9
+    sigma_o: float | None = None    # observation error SD, canonical unit (see SIGMA_O_UPPER)
+
+
+LEVELS = (1000, 925, 850, 700, 500, 300, 250, 200)
+
+# Observation error. sigma_o is the standard deviation of the difference between an
+# observation and the grid-scale truth it is compared with: instrument error plus
+# representativeness error, which dominates for a 10-25 km model. The values below are
+# approximate starting points of the size global data assimilation assigns to these
+# observation types (ECMWF and NCEP observation-error tables), not measured here; they are
+# meant to be replaced by estimates from the database itself (Desroziers et al. 2005).
+SIGMA_O_UPPER = {
+    "z": (5.0, 5.5, 6.0, 7.0, 9.0, 12.0, 13.0, 14.0),     # m
+    "t": (1.2, 1.1, 1.0, 0.9, 0.8, 0.9, 1.0, 1.1),         # K
+    "u": (1.8, 1.8, 1.9, 2.0, 2.2, 2.6, 2.6, 2.5),         # m s-1, each component
+    "v": (1.8, 1.8, 1.9, 2.0, 2.2, 2.6, 2.6, 2.5),
+}
 
 
 def _upper(base: str, level: int, label: str, unit: str, grib: tuple[str, ...], std: tuple[str, ...],
            lo: float, hi: float) -> Var:
     return Var(f"{base}{level}", f"{level} hPa {label}", unit, "upper", float(level), grib,
-               "isobaricInhPa", std, (f"{base}{level}", f"{base.upper()}{level}"), lo, hi)
+               "isobaricInhPa", std, (f"{base}{level}", f"{base.upper()}{level}"), lo, hi,
+               SIGMA_O_UPPER[base][LEVELS.index(level)])
 
 
 SURFACE = [
     Var("t2m", "2 m temperature", "degC", "surface", grib=("2t", "t2m"), grib_level="heightAboveGround",
         standard_names=("air_temperature",),
         aliases=("t2m", "2t", "T2", "tas", "TMP_2maboveground", "air_temperature_2m", "temperature_2m"),
-        lo=-90, hi=60),
+        lo=-90, hi=60, sigma_o=1.4),
     Var("td2m", "2 m dew point", "degC", "surface", grib=("2d", "d2m"), grib_level="heightAboveGround",
         standard_names=("dew_point_temperature",),
         aliases=("d2m", "2d", "td2m", "TD2", "DPT_2maboveground", "dewpoint_temperature_2m"),
-        lo=-90, hi=40),
+        lo=-90, hi=40, sigma_o=1.6),
     Var("msl", "mean sea-level pressure", "hPa", "surface", grib=("prmsl", "msl", "mslet"),
         grib_level="meanSea", standard_names=("air_pressure_at_mean_sea_level", "air_pressure_at_sea_level"),
-        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=850, hi=1090),
+        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=850, hi=1090,
+        sigma_o=1.0),
     Var("u10", "10 m zonal wind", "m s-1", "surface", grib=("10u", "u10"), grib_level="heightAboveGround",
         standard_names=("eastward_wind",), aliases=("u10", "10u", "U10", "uas", "UGRD_10maboveground"),
-        lo=-75, hi=75),
+        lo=-75, hi=75, sigma_o=1.8),
     Var("v10", "10 m meridional wind", "m s-1", "surface", grib=("10v", "v10"),
         grib_level="heightAboveGround", standard_names=("northward_wind",),
-        aliases=("v10", "10v", "V10", "vas", "VGRD_10maboveground"), lo=-75, hi=75),
+        aliases=("v10", "10v", "V10", "vas", "VGRD_10maboveground"), lo=-75, hi=75,
+        sigma_o=1.8),
     Var("ws10", "10 m wind speed", "m s-1", "surface", grib=("10si", "si10"), grib_level="heightAboveGround",
         standard_names=("wind_speed",), aliases=("si10", "10si", "ws10", "wind_speed_10m", "sfcWind"),
-        lo=0, hi=75),
+        lo=0, hi=75, sigma_o=1.6),
     Var("orog", "model orography", "m", "surface", grib=("orog", "z", "hgt"), grib_level="surface",
         standard_names=("surface_altitude", "surface_geopotential"),
         aliases=("orog", "HGT_surface", "HGT", "z_sfc", "zs", "terrain", "orography"), lo=-500, hi=9000),
+    Var("fsr", "model surface roughness", "m", "surface", grib=("fsr", "sr"), grib_level="surface",
+        standard_names=("surface_roughness_length",),
+        aliases=("fsr", "sr", "SFCR", "SFCR_surface", "znt", "ZNT", "z0", "surface_roughness"), lo=0, hi=10),
+    Var("lsm", "model land fraction", "1", "surface", grib=("lsm", "land"), grib_level="surface",
+        standard_names=("land_binary_mask", "land_area_fraction"),
+        aliases=("lsm", "LAND", "LAND_surface", "landmask", "LANDMASK", "sftlf", "land_sea_mask"), lo=0, hi=1),
 ]
+
+# Fields describing the model surface rather than the atmosphere: read from any file of a
+# forecast, attached to every field on the same grid, never scored.
+STATIC = ("orog", "fsr", "lsm")
 
 UPPER = [
     *(_upper("z", lv, "geopotential height", "m", ("gh", "z", "hgt"),
@@ -69,11 +99,11 @@ UPPER = [
       for lv, lo, hi in [(1000, -700, 700), (925, 150, 1300), (850, 700, 1900), (700, 2150, 3500),
                          (500, 4400, 6200), (300, 7600, 10000), (250, 8800, 11300), (200, 10000, 12800)]),
     *(_upper("t", lv, "temperature", "degC", ("t", "tmp"), ("air_temperature",), -100, 50)
-      for lv in (1000, 925, 850, 700, 500, 300, 250, 200)),
+      for lv in LEVELS),
     *(_upper("u", lv, "zonal wind", "m s-1", ("u", "ugrd"), ("eastward_wind",), -120, 120)
-      for lv in (1000, 925, 850, 700, 500, 300, 250, 200)),
+      for lv in LEVELS),
     *(_upper("v", lv, "meridional wind", "m s-1", ("v", "vgrd"), ("northward_wind",), -120, 120)
-      for lv in (1000, 925, 850, 700, 500, 300, 250, 200)),
+      for lv in LEVELS),
 ]
 
 CATALOG: dict[str, Var] = {v.name: v for v in SURFACE + UPPER}
@@ -118,6 +148,10 @@ def to_canonical(values, unit: str | None, var: Var):
             return values * 10.0
         if not u and var.level is not None and var.level <= 700 and float(values.max()) > 30000:
             return values / G0
+        return values
+    if var.unit == "1":  # fractions, sometimes given in percent (CMIP sftlf)
+        if u in ("%", "percent") or float(values.max()) > 1.5:
+            return values / 100.0
         return values
     if var.unit == "m s-1":
         if u in ("kt", "knots", "kts"):

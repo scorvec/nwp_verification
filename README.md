@@ -25,6 +25,11 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 | radiosondes | height, temperature and wind at 1000-200 hPa | same, plus vector wind RMSE |
 | ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill |
 
+Every score also has an observation-error-aware version (`rmse_oc`, `crps_oe`, `ssr_oe`). Radiosonde
+levels are matched where the balloon drifted to. Surface stations more than 100 m from the model terrain
+are left out, coastal stations are matched to land grid points when the files have a land-sea mask, and
+winds from anemometers that are not at 10 m are corrected to 10 m. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
+
 ## Commands
 
 ```
@@ -33,6 +38,8 @@ mverify score [NAME=]FILES... [options]   verify; --out scorecard JSON, --pairs 
 mverify db status                         rows, stations and time span per variable, QC flag rates
 mverify db ghcnh --year 2026 --bbox conus build or update surface observations
 mverify db soundings                      build or update radiosonde levels
+mverify db sensors FILE.csv               load thermometer / anemometer heights
+mverify db init                           create a database, or upgrade an older one
 mverify db export DIR                     write the Parquet snapshot users query
 ```
 

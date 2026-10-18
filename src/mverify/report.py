@@ -28,7 +28,7 @@ from mverify import variables as V
 from mverify.scores import REGION_LABELS
 
 TRUTH = {"GHCNH": ("ghcnh", "surface stations (GHCNh)"), "RAOB": ("raob", "radiosondes")}
-STATS = ("rmse", "bias", "mae", "corr", "crps", "spread", "ssr", "n")
+STATS = ("rmse", "rmse_oc", "bias", "mae", "corr", "crps", "crps_oe", "spread", "spread_oe", "ssr", "ssr_oe", "n")
 
 
 def _label(var: str) -> tuple[str, str]:

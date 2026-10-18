@@ -1,4 +1,5 @@
--- mverify observation database, schema version 1 (DuckDB).
+-- mverify observation database, schema version 2 (DuckDB). Upgrades from older versions are in
+-- mverify/db/migrations/; ObsStore applies them in order when it opens a database.
 --
 -- Design rules
 --   * One long table, obs, holds every cleaned observation: surface reports and
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS variables (
     level_hpa    DOUBLE,                      -- pressure level for kind = 'upper'
     lo           DOUBLE NOT NULL,             -- physical limits used by the range check
     hi           DOUBLE NOT NULL,
+    sigma_o      DOUBLE CHECK (sigma_o > 0),  -- observation error SD (instrument + representativeness), unit
     CHECK (lo < hi),
     CHECK ((kind = 'upper') = (level_hpa IS NOT NULL))
 );
@@ -53,6 +55,8 @@ CREATE TABLE IF NOT EXISTS stations (
     lat          DOUBLE NOT NULL CHECK (lat BETWEEN -90 AND 90),
     lon          DOUBLE NOT NULL CHECK (lon >= -180 AND lon <= 180),
     elev_m       DOUBLE CHECK (elev_m BETWEEN -500 AND 9000),
+    t_height_m   DOUBLE CHECK (t_height_m BETWEEN 0.5 AND 30),     -- thermometer above ground; NULL = unknown
+    wind_height_m DOUBLE CHECK (wind_height_m BETWEEN 1 AND 100),  -- anemometer above ground; NULL = unknown
     wmo_id       VARCHAR,
     icao         VARCHAR,
     country      VARCHAR,
@@ -66,8 +70,11 @@ CREATE TABLE IF NOT EXISTS obs (
     variable     VARCHAR NOT NULL,            -- variables.name
     value        DOUBLE NOT NULL CHECK (isfinite(value)),
     qc           USMALLINT NOT NULL DEFAULT 0,  -- bitwise OR of qc_flags.bit; 0 = clean
-    dt_min       SMALLINT NOT NULL DEFAULT 0 CHECK (dt_min BETWEEN -59 AND 59),  -- report time - valid_time
+    dt_min       SMALLINT NOT NULL DEFAULT 0 CHECK (dt_min BETWEEN -180 AND 180),  -- observation time - valid_time
+    lat          DOUBLE CHECK (lat BETWEEN -90 AND 90),             -- where it was observed, when that is not the
+    lon          DOUBLE CHECK (lon >= -180 AND lon <= 180),         -- station (a drifting balloon); else NULL
     source       VARCHAR NOT NULL,            -- upstream product and report type, e.g. 'ghcnh:FM15'
+    CHECK ((lat IS NULL) = (lon IS NULL)),
     -- logical key: (station_id, valid_time, variable), see the note at the top
     CHECK (date_part('minute', valid_time) = 0 AND date_part('second', valid_time) = 0)
 );

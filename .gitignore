@@ -4,6 +4,6 @@ __pycache__/
 .ruff_cache/
 *.duckdb
 *.duckdb.wal
-data/
+/data/
 build/
 dist/

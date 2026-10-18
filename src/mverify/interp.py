@@ -79,6 +79,20 @@ class PointInterpolator:
         w /= w.sum(axis=1, keepdims=True)
         return idx, w, inside
 
+    def over(self, keep: np.ndarray) -> PointInterpolator:
+        """The same points interpolated only from grid points where ``keep`` is true (e.g. land).
+
+        Weights of the other neighbours are dropped and the rest renormalised; a point
+        with no kept neighbour is outside.
+        """
+        out = object.__new__(PointInterpolator)
+        w = self.w * np.asarray(keep, bool).ravel()[self.idx]
+        total = w.sum(axis=1, keepdims=True)
+        out.n, out.idx = self.n, self.idx
+        out.w = np.divide(w, total, out=np.zeros_like(w), where=total > 0)
+        out.inside = self.inside & (total[:, 0] > 0)
+        return out
+
     def __call__(self, field: np.ndarray, which: np.ndarray | None = None) -> np.ndarray:
         """Field values at all points, or at the point indices ``which``; NaN outside the grid."""
         flat = np.asarray(field, float).ravel()

@@ -42,7 +42,13 @@
 </main>
 <script>
 const COLORS = ["--s1", "--s2", "--s3", "--s4", "--s5"].map(v => getComputedStyle(document.documentElement).getPropertyValue(v).trim());
-const NAMES = { rmse: "RMSE", bias: "Bias (forecast − observed)", mae: "MAE", corr: "Correlation", crps: "CRPS", spread: "Spread", ssr: "Spread/skill", n: "Pairs" };
+const NAMES = {
+  rmse: "RMSE", rmse_oc: "RMSE, observation error removed", bias: "Bias (forecast − observed)", mae: "MAE",
+  corr: "Correlation", crps: "CRPS", crps_oe: "CRPS, observation error included", spread: "Spread",
+  spread_oe: "Spread incl. observation error", ssr: "Spread/skill", ssr_oe: "Spread/skill incl. observation error",
+  n: "Pairs",
+};
+const UNITLESS = new Set(["corr", "ssr", "ssr_oe", "n"]);
 const src = new URLSearchParams(location.search).get("src") || "scores.json";
 const $ = id => document.getElementById(id);
 
@@ -82,7 +88,7 @@ function draw(card) {
     const svg = chart(r, card, stat);
     if (!svg) return "";
     const legend = Object.keys(r.scores).map((m, i) => `<span><i style="background:${COLORS[i % COLORS.length]}"></i>${m}</span>`).join("");
-    return `<div class="card"><h2>${r.label}</h2><div class="sub">${NAMES[stat]}${stat === "corr" || stat === "ssr" || stat === "n" ? "" : " (" + r.unit + ")"}</div>${svg}<div class="legend">${legend}</div></div>`;
+    return `<div class="card"><h2>${r.label}</h2><div class="sub">${NAMES[stat]}${UNITLESS.has(stat) ? "" : " (" + r.unit + ")"}</div>${svg}<div class="legend">${legend}</div></div>`;
   }).join("") || "<p>No scores for this selection.</p>";
 }
 
