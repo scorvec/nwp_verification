@@ -46,6 +46,15 @@ def test_models_are_compared_on_the_pairs_they_all_have(tmp_path, filled_store, 
     assert own.groupby("model")["n"].max().to_dict() == {"FLAT": 1, "HIGH": 2}
 
 
+def test_a_coarser_common_grid_keeps_a_smooth_field(tmp_path, filled_store, forecast_ds):
+    # The field is a plane, which area averaging and bilinear interpolation both keep (to within the
+    # sin-latitude weighting).
+    forecast_ds.to_netcdf(tmp_path / "m.nc")
+    res = verify({"M": [tmp_path / "m.nc"]}, filled_store, regions=["conus"], max_dz=None, grid=1.0)
+    assert (res.table["n"] == 3).all()
+    assert res.table["rmse"].max() < 0.01
+
+
 def test_known_bias_and_the_same_answer_from_every_format(tmp_path, filled_store, forecast_ds):
     warm = forecast_ds.copy()
     warm["t2m"] = warm["t2m"] + 1.5

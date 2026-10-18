@@ -219,6 +219,14 @@ so scores can be stratified by any of them.
   moved to the station height at 6.5 K/km, and every surface pair with |dz_m| > 100 m is
   dropped (`--max-dz`): there the station samples a valley or a ridge the model does not
   resolve, and no lapse rate fixes that.
+* **Resolution** (`coarsen.py`, `--grid DEG`). Interpolated from its own grid, a finer model
+  carries small-scale detail whose position errors count twice (the double penalty), and a model
+  published on a grid finer than its own resolution looks sharper than it is. With a common grid,
+  every field is averaged onto one regular DEG-degree grid by area overlap (first-order
+  conservative, so 0.15 and 0.25 deg grids both average onto 0.5 deg exactly), and the model
+  terrain, land fraction and roughness with it (roughness as the mean of its logarithm); a cell
+  needs valid values over half its area. Matching then interpolates every model to the stations
+  from cells of the same size. Precipitation is regridded again onto each analysis grid.
 * **Coastlines**. With a land-sea mask in the files (GFS `LAND`, ECMWF `lsm`, CMIP `sftlf`),
   surface variables at stations are interpolated from land grid points only, so a coastal
   station is not handed the sea's temperature or wind, and a station with no land point among
