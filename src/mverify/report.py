@@ -84,6 +84,48 @@ def scorecard(table: pd.DataFrame, inits: dict[str, list[str]], tests: pd.DataFr
             "leads": [int(x) if float(x).is_integer() else x for x in leads], "inits": inits, "rows": rows}
 
 
+def station_map(stations: pd.DataFrame, leads: list[float] | None = None, variables: list[str] | None = None,
+                min_n: int = 5) -> dict:
+    """Per-station scores (``Result.stations``) as JSON for a map: one layer per network and variable.
+
+        {"models": [...], "leads": [24, 72, ...],
+         "layers": [{"var": "t2m", "label": ..., "unit": ..., "truth": ..., "ids": [...], "lat": [...],
+                     "lon": [...], "scores": {"GFS": {"rmse": [[per station] per lead], "bias": ..., "n": ...}}}]}
+
+    Only stations where every model has at least ``min_n`` pairs at a lead get a value there, so
+    the models' maps show the same stations.
+    """
+    st = stations
+    if leads is not None:
+        st = st[st["lead_h"].isin(leads)]
+    if variables is not None:
+        st = st[st["variable"].isin(variables)]
+    models = sorted(st["model"].unique().tolist())
+    leads = sorted(st["lead_h"].unique().tolist())
+    layers = []
+    for (net, var), g in st.groupby(["network", "variable"], sort=True):
+        g = g[g["n"] >= min_n]
+        full = g.groupby(["station_id", "lead_h"])["model"].transform("nunique") == len(models)
+        g = g[full]
+        if g.empty:
+            continue
+        pos = g.groupby("station_id")[["lat", "lon"]].median()
+        label, unit = _label(var)
+        scores = {}
+        for model, m in g.groupby("model"):
+            scores[model] = {}
+            for s in ("rmse", "bias", "n"):
+                grid = m.pivot(index="station_id", columns="lead_h", values=s).reindex(index=pos.index, columns=leads)
+                scores[model][s] = [[None if pd.isna(v) else (int(v) if s == "n" else round(float(v), 3))
+                                     for v in grid[c]] for c in leads]
+        layers.append({"var": var, "label": label, "unit": unit, "truth": TRUTH.get(net, (net, net))[1],
+                       "ids": [i.split(":", 1)[1] for i in pos.index], "lat": [round(x, 3) for x in pos["lat"]],
+                       "lon": [round(x, 3) for x in pos["lon"]], "scores": scores})
+    return {"generated": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"),
+            "package": f"mverify {__version__}", "models": models,
+            "leads": [int(x) if float(x).is_integer() else x for x in leads], "layers": layers}
+
+
 def write_json(card: dict, path: str | Path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(card, separators=(",", ":"), allow_nan=False))

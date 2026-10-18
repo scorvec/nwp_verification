@@ -112,3 +112,19 @@ def test_igra_ingest_writes_each_changed_file_once(store, monkeypatch):
     assert n == len(obs) and {"z500", "t850", "u700", "q850"} <= set(obs["variable"])
     assert obs.set_index("variable").loc["q850", "value"] == pytest.approx(V.specific_humidity(0.0, 850), rel=1e-6)  # 3 C, depression 3 C
     assert igra.ingest(store, since="2026-10-01", progress=lambda *a: None) == 0  # unchanged file: not read again
+
+
+def test_station_scores_for_maps():
+    from mverify import report, scores
+    pairs = _upper_pairs()
+    st = scores.by_station(pairs)
+    one = st[(st["model"] == "A") & (st["variable"] == "t500") & (st["station_id"] == "RAOB:0")].iloc[0]
+    p = pairs[(pairs["model"] == "A") & (pairs["variable"] == "t500") & (pairs["station_id"] == "RAOB:0")]
+    assert one["n"] == 6 and one["rmse"] == pytest.approx(np.sqrt(((p["fcst"] - p["obs"]) ** 2).mean()))
+    assert one["bias"] == pytest.approx((p["fcst"] - p["obs"]).mean()) and one["lat"] == 40.0
+    assert "wind500" in set(st["variable"])
+    m = report.station_map(st, variables=["t500", "wind500"])
+    t = next(layer for layer in m["layers"] if layer["var"] == "t500")
+    assert m["models"] == ["A", "B"] and m["leads"] == [48]
+    assert len(t["ids"]) == 37  # the three stations B misses are left off both maps
+    assert len(t["scores"]["A"]["rmse"][0]) == 37 and t["unit"] == "degC"
