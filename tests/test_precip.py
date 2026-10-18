@@ -151,3 +151,18 @@ def test_a_perfect_precipitation_forecast(tmp_path, store):
     assert t.loc["tp24", "lead_h"] == 36 and t.loc["tp24", "bias"] == pytest.approx(0.0, abs=1e-9)
     assert t.loc["tp24>=10mm", "ets"] == pytest.approx(1.0) and t.loc["tp24>=10mm", "fss_100km"] == pytest.approx(1.0)
     assert (t["network"] == "STAGEIV").all() and (t["region"] == "conus").all()
+
+
+def test_imerg_daily_files_are_read_lat_by_lon(tmp_path):
+    from mverify.precip.analyses import read_imerg
+    lon, lat = np.arange(-179.95, 180, 0.1)[::360], np.arange(-89.95, 90, 0.1)[::180]
+    a = np.zeros((1, lon.size, lat.size), "float32")  # IMERG stores (time, lon, lat)
+    a[0, 0, -1] = 12.5
+    a[0, 1, 0] = -9999.9
+    ds = xr.Dataset({"precipitation": (("time", "lon", "lat"), a, {"_FillValue": np.float32(-9999.9)})},
+                    coords={"time": [0], "lon": lon, "lat": lat})
+    ds.to_netcdf(tmp_path / "3B-DAY-L.nc4")
+    da = read_imerg(tmp_path / "3B-DAY-L.nc4", pd.Timestamp("2026-10-16"))
+    assert da.dims == ("latitude", "longitude") and da.shape == (lat.size, lon.size)
+    assert da.values[-1, 0] == 12.5 and np.isnan(da.values[0, 1])
+    assert da.attrs["product"] == "imerg_late" and da.attrs["valid_time"] == "2026-10-16T00:00:00"

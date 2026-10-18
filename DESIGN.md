@@ -250,7 +250,8 @@ same cells.
 | product | coverage | window | source |
 |---|---|---|---|
 | `stageiv` | CONUS, ~4.8 km polar stereographic | 24 h ending 12Z | NCEP Stage IV (radar + gauges, RFC quality control), Iowa Environmental Mesonet archive, no login |
-| `gpcp` | global, 0.5° | 24 h ending 00Z | GPCP V3.3 daily, NASA GES DISC, Earthdata login; the successor of the V3.2 climatology behind the scorvec.com rain bias correction |
+| `gpcp` | global, 0.5° | 24 h ending 00Z | GPCP V3.3 daily, NASA GES DISC, Earthdata login; the successor of the V3.2 climatology behind the scorvec.com rain bias correction; months behind real time |
+| `imerg_late` | global, 0.1° | 24 h ending 00Z | GPM IMERG Late daily V07, GES DISC, Earthdata login; about 14 h behind real time, the satellite estimate GPCP V3 is built on |
 
 * **Storage.** `mverify db precip --start ... --product stageiv gpcp` stores each window unchanged
   as a small Zarr store in `obs_grids/` next to the database and catalogues it in `grids`. The
@@ -277,10 +278,16 @@ same cells.
   ETS 0.41 / 0.38 / 0.29 / 0.02 at 1 / 10 / 25 / 50 mm, frequency bias 1.33 at 1 mm and 0.13 at
   50 mm (too much light rain, too little heavy rain), FSS at 10 mm from 0.69 (50 km) to 0.91
   (400 km).
-* **Latency.** Stage IV is final within about a day. GPCP V3.3 daily currently ends at
-  2025-12-31, and NOAA's GPCP daily CDR (v1.3, 1°, on AWS) runs about 2.5 months behind, so
-  global scores of recent forecasts need a faster analysis. IMERG Late, which GPCP V3 is built
-  on, is the candidate.
+* **Latency, and why there are two global products.** Stage IV is final within about a day.
+  GPCP V3.3 daily currently ends at 2025-12-31, so it scores the archive; IMERG Late scores the
+  recent months. They are kept as separate truths (`GPCP`, `IMERG_LATE` rows) rather than spliced
+  into one series, because a satellite-only estimate and a gauge-adjusted one differ in bias and
+  a splice would show up as a jump in the scores.
+* **Checking the providers.** The `analyses` workflow fetches one window of each product weekly
+  and on changes to `precip/`, and fails when a file no longer reads as a plausible field. GPCP
+  and IMERG need `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD` as repository secrets; without them
+  those two are skipped. Their readers follow the documented file layouts and are unit-tested on
+  synthetic files, but have not yet read a real file (this build machine has no Earthdata login).
 
 ## 5. Feeding scorvec.com
 

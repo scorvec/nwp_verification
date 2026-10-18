@@ -12,11 +12,15 @@ database stores them unchanged on their native grids (``ObsStore.add_grid``).
   gpcp      GPCP V3.3 daily, global 0.5 deg, 24 h ending 00Z: satellite + gauge,
             IMERG Final-based within 60S-60N, from NASA GES DISC (Earthdata login).
             The same family as the V3.2 climatology of the scorvec.com rain bias
-            correction; V3.3 continues it past 2021.
+            correction; V3.3 continues it past 2021, but months behind real time.
+  imerg_late  GPM IMERG Late daily (V07), global 0.1 deg, 24 h ending 00Z, about
+            14 h after real time: the satellite estimate GPCP V3 is built on,
+            for recent forecasts GPCP does not reach yet. GES DISC, Earthdata login.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,8 +81,30 @@ def read_gpcp(path: Path, valid: pd.Timestamp) -> xr.DataArray:
     return _finish(a, lat, ((lon + 180) % 360) - 180, "gpcp", valid, 24, ("latitude", "longitude"))
 
 
+def read_imerg(path: Path, valid: pd.Timestamp) -> xr.DataArray:
+    """IMERG daily: ``precipitation`` (time, lon, lat) in mm/day for the UTC day ending at ``valid``."""
+    with xr.open_dataset(path, decode_times=False, mask_and_scale=True) as ds:
+        da = ds["precipitation"].isel(time=0).transpose("lat", "lon")
+        a, lat, lon = np.asarray(da.values, float), ds["lat"].values, ds["lon"].values
+    return _finish(np.nan_to_num(a, nan=-1.0), lat, lon, "imerg_late", valid, 24, ("latitude", "longitude"))
+
+
 GES_DISC = "https://measures.gesdisc.eosdis.nasa.gov/data/GPCP/GPCPDAY.3.3"
+IMERG_LATE = "https://gpm1.gesdisc.eosdis.nasa.gov/data/GPM_L3/GPM_3IMERGDL.07"
 IEM = "https://mesonet.agron.iastate.edu/archive/data"
+
+
+def imerg_url(valid: pd.Timestamp) -> str:
+    """The IMERG Late daily file for the day ending at ``valid``; its minor version (V07B, V07C ...) is
+    read from the directory listing, which needs no login."""
+    day = valid - pd.Timedelta("1D")
+    base = f"{IMERG_LATE}/{day:%Y/%m}"
+    names = re.findall(rf'href="(3B-DAY-L\.MS\.MRG\.3IMERG\.{day:%Y%m%d}-S000000-E235959\.V07[A-Z]?\.nc4)"',
+                       http.get(f"{base}/").decode(errors="replace"))
+    if not names:
+        raise FileNotFoundError(f"IMERG Late has no file for {day:%Y-%m-%d} yet")
+    return f"{base}/{max(names)}"
+
 
 PRODUCTS: dict[str, Product] = {
     "stageiv": Product("stageiv", "Stage IV (CONUS)", 24, 12, ("conus",),
@@ -87,6 +113,8 @@ PRODUCTS: dict[str, Product] = {
     "gpcp": Product("gpcp", "GPCP V3.3 daily", 24, 0, ("global", "nh", "tropics", "sh"),
                     lambda t: f"{GES_DISC}/{t - pd.Timedelta('1D'):%Y}/GPCPDAY_L3_{t - pd.Timedelta('1D'):%Y%m%d}_V3.3.nc4",
                     read_gpcp, login=True),
+    "imerg_late": Product("imerg_late", "IMERG Late daily", 24, 0, ("global", "nh", "tropics", "sh"),
+                          imerg_url, read_imerg, login=True),
 }
 
 
@@ -107,7 +135,7 @@ def ingest(store, product: str, start, end, cache_dir: Path, progress=print) -> 
         try:
             store.add_grid(fetch(p, t, cache_dir))
             added += 1
-        except FileNotFoundError:
+        except PermissionError:  # missing credentials: every window would fail the same way
             raise
         except Exception as e:  # noqa: BLE001 - one missing or bad day must not stop the rest
             progress(f"  {product} {t:%Y-%m-%d %H}Z skipped: {e}")

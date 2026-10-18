@@ -174,8 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--root", default=None, help="mirror URL or local checkout of the skewt-data branch")
     r.add_argument("--since", help="only ascents at or after this time")
     r.add_argument("--bbox")
-    pr = dsub.add_parser("precip", help="add precipitation analyses (Stage IV over CONUS, GPCP globally)")
-    pr.add_argument("--product", nargs="+", default=["stageiv", "gpcp"], choices=["stageiv", "gpcp"])
+    pr = dsub.add_parser("precip", help="add precipitation analyses (Stage IV over CONUS; GPCP and IMERG Late "
+                         "globally, which need EARTHDATA_USERNAME / EARTHDATA_PASSWORD)")
+    pr.add_argument("--product", nargs="+", default=["stageiv", "gpcp", "imerg_late"],
+                    choices=["stageiv", "gpcp", "imerg_late"])
     pr.add_argument("--start", required=True, help="first window end, e.g. 2026-10-01")
     pr.add_argument("--end", help="last window end (default now)")
     sn = dsub.add_parser("sensors", help="load thermometer and anemometer heights from a CSV")

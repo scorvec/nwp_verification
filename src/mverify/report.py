@@ -29,7 +29,8 @@ from mverify import variables as V
 from mverify.scores import REGION_LABELS
 
 TRUTH = {"GHCNH": ("ghcnh", "surface stations (GHCNh)"), "RAOB": ("raob", "radiosondes"),
-         "STAGEIV": ("stageiv", "Stage IV analysis"), "GPCP": ("gpcp", "GPCP analysis")}
+         "STAGEIV": ("stageiv", "Stage IV analysis"), "GPCP": ("gpcp", "GPCP analysis"),
+         "IMERG_LATE": ("imerg_late", "IMERG Late analysis")}
 STATS = ("rmse", "rmse_oc", "bias", "mae", "corr", "crps", "crps_oe", "spread", "spread_oe", "ssr", "ssr_oe",
          "ets", "fbias", "pod", "far", "fss_50km", "fss_100km", "fss_200km", "fss_400km", "fcst_mean", "obs_mean",
          "base_rate", "n")
