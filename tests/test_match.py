@@ -112,3 +112,20 @@ def test_surface_pressure_without_model_terrain_is_left_out(tmp_path, store, ini
     store.upsert_obs(pd.DataFrame([{"station_id": "GHCNH:A", "valid_time": init, "variable": "sp", "value": 1010.0,
                                     "source": "test"}]))
     assert M.match(open_forecast(tmp_path / "q.nc", init=init), store).empty
+
+
+def test_a_gauge_total_is_paired_with_the_run_total_over_the_same_24_hours(tmp_path, store, init):
+    store.upsert_stations(pd.DataFrame({"station_id": ["GHCNH:G"], "network": "GHCNH", "lat": [40.2],
+                                        "lon": [-100.3], "elev_m": [0.0]}))
+    lat, lon = np.arange(60.0, 19.9, -0.5), np.arange(220.0, 300.01, 0.5)
+    running = np.stack([np.full((lat.size, lon.size), 3.0), np.full((lat.size, lon.size), 11.0)])[None]  # 0-12 h, 0-36 h
+    xr.Dataset({"tp": (("time", "step", "latitude", "longitude"), running, {"units": "mm"}),
+                "orog": (("latitude", "longitude"), np.zeros((lat.size, lon.size)), {"units": "m"})},
+               coords={"time": [init], "step": pd.to_timedelta([12, 36], unit="h"), "latitude": lat,
+                       "longitude": lon}).to_netcdf(tmp_path / "r.nc")
+    store.upsert_obs(pd.DataFrame([{"station_id": "GHCNH:G", "valid_time": init + pd.Timedelta(h, "h"), "variable": "pr24",
+                                    "value": 10.0, "source": "test"} for h in (36, 60)]))
+    p = M.match(open_forecast(tmp_path / "r.nc"), store)
+    g = p[p["variable"] == "pr24"]
+    assert len(g) == 1 and g["lead_h"].iloc[0] == 36  # 12-36 h; the run cannot give 36-60 h
+    assert g["fcst"].iloc[0] == pytest.approx(8.0) and g["obs"].iloc[0] == 10.0

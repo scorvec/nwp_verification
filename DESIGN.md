@@ -304,6 +304,20 @@ same cells.
   ETS 0.41 / 0.38 / 0.29 / 0.02 at 1 / 10 / 25 / 50 mm, frequency bias 1.33 at 1 mm and 0.13 at
   50 mm (too much light rain, too little heavy rain), FSS at 10 mm from 0.69 (50 km) to 0.91
   (400 km).
+* **Maps** (`maps.py`, `report.precip_maps`). On a forecast already on a coarse common grid
+  (`coarsen`), each analysis window is averaged onto that grid where it covers at least half a
+  cell, and every run's total over the window is compared with it cell by cell. Windows are pooled
+  into lead groups (days 1-2, 3-5, 6-9) for each cell's bias, RMSE and mean forecast and analysed
+  amounts. A cell's bias is tested over the valid days (the day's error averaged over the runs that
+  verify it), with the paired test and day-to-day allowance of `significance.py`, once it has at
+  least 8 days; the p values of all cells of a map go through Benjamini-Hochberg at a false-discovery
+  rate of 10 % (`significance.fdr`), so a map shades only the cells whose bias is unlikely to be
+  noise.
+* **Gauges** (`pr24`). The 24 h totals stations report (GHCNh `precipitation_24_hour`; US ASOS
+  at 12Z, the window Stage IV uses) are matched like any station variable, with each run's total
+  over the same 24 h built from its accumulations, so they get the same sample rules, scores and
+  paired tests. They check the gridded scores at points; in the US they are not independent of
+  Stage IV, whose analyses take in ASOS gauges, while elsewhere they are the only daily truth.
 * **Latency, and why there are two global products.** Stage IV is final within about a day.
   GPCP V3.3 daily currently ends at 2025-12-31, so it scores the archive; IMERG Late scores the
   recent months. They are kept as separate truths (`GPCP`, `IMERG_LATE` rows) rather than spliced

@@ -1,5 +1,7 @@
 """Precipitation: accumulations from files, regridding, scores, analyses in the store, end to end."""
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -187,3 +189,53 @@ def test_eccc_precipitation_is_recognised_by_its_wmo_code(tmp_path):
     eccodes.codes_release(h)
     (f,) = open_forecast(p).fields
     assert f.var == "tp" and f.accum == (0 * H, 36 * H) and f.values().mean() == pytest.approx(4.0)
+
+
+def test_coverage_is_the_share_of_a_cells_points_with_values():
+    src = Grid(np.array([0.25, 0.75]), np.array([0.25, 0.75]))
+    rg = Regridder(src, Grid(np.array([0.5, 1.5]), np.array([0.5, 1.5])))
+    assert rg.coverage(np.array([[1.0, np.nan], [2.0, 3.0]])).tolist() == [[0.75, 0.0], [0.0, 0.0]]
+
+
+def test_fdr_keeps_the_p_values_below_the_benjamini_hochberg_line():
+    from mverify.significance import fdr
+    p = np.array([0.001, 0.008, 0.039, 0.041, 0.6, np.nan])
+    assert fdr(p, 0.10).tolist() == [True, True, True, True, False, False]
+    assert fdr(np.array([0.2, 0.5, np.nan]), 0.10).tolist() == [False, False, False]
+
+
+def test_cell_maps_shade_a_steady_bias_and_leave_noise_alone(tmp_path, store):
+    from mverify.coarsen import coarsen
+    from mverify.precip.maps import cell_scores
+    rng = np.random.default_rng(3)
+    inits = pd.date_range("2026-10-01", periods=12, freq="D")
+    flat, flon = np.arange(30.05, 40.0, 0.1), np.arange(-99.95, -90.0, 0.1)  # analysis, 0.1 deg
+    clat, clon = np.arange(30.25, 40.0, 0.5), np.arange(-99.75, -90.0, 0.5)  # forecast, 0.5 deg
+    tps = []
+    for k, init in enumerate(inits):
+        block = rng.gamma(1.0, 5.0, (clat.size, clon.size))  # the day's rain, uniform within each 0.5 deg cell
+        obs = np.repeat(np.repeat(block, 5, 0), 5, 1)
+        obs[:, flon > -91.0] = np.nan  # the analysis ends 1 deg short of the east edge
+        store.add_grid(_finish(obs, flat, flon, "stageiv", init + pd.Timedelta("36h"), 24, ("latitude", "longitude")))
+        wet = np.where(clon < -95.0, 2.0, 0.0)  # the west half rains 2 mm too much every day
+        tps.append(np.stack([np.zeros_like(block), block + wet + rng.normal(0, 0.5, block.shape)]))
+    xr.Dataset({"tp": (("time", "step", "latitude", "longitude"), np.stack(tps), {"units": "mm"})},
+               coords={"time": inits, "step": pd.to_timedelta([12, 36], unit="h"), "latitude": clat,
+                       "longitude": clon}).to_netcdf(tmp_path / "f.nc")
+    m = cell_scores(open_forecast(tmp_path / "f.nc"), store).sel(group="days 1-2")
+    west, east = m.where(m.lon < -95.0, drop=True), m.where((m.lon > -95.0) & (m.lon < -91.5), drop=True)
+    assert float(west["bias"].mean()) == pytest.approx(2.0, abs=0.2) and bool(west["significant"].all())
+    assert abs(float(east["bias"].mean())) < 0.2 and float(east["significant"].mean()) < 0.1
+    assert int(m["days"].max()) == 12 and float(m.lon.max()) == -91.25  # cut to where the analysis reaches
+    assert (m["rmse"] >= np.abs(m["bias"]) - 1e-9).all()
+    # the same through the common grid: the 0.5 deg forecast lies on it already
+    c = cell_scores(coarsen(open_forecast(tmp_path / "f.nc"), 0.5), store)
+    assert c is not None and float(c["bias"].sel(group="days 1-2").max()) > 1.5
+    # and as map JSON: tenths of a mm, row by row, None outside, 1 where the bias passes
+    from mverify import report
+    card = report.precip_maps({"M": c})
+    g = card["models"]["M"]
+    assert card["truth"] == "Stage IV analysis" and [x["label"] for x in card["groups"]] == ["days 1-2", "days 3-5", "days 6-9"]
+    assert len(g["bias"][0]) == len(g["lat"]) * len(g["lon"]) and set(g["significant"][0]) <= {0, 1}
+    assert max(v for v in g["bias"][0] if v is not None) > 15 and g["bias"][1] == [None] * len(g["bias"][1])
+    json.dumps(card, allow_nan=False)

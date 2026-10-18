@@ -215,3 +215,9 @@ def test_ghcnh_station_level_pressure_is_surface_pressure():
     raw = ghcnh_frame([{"DATE": "2026-10-13T12:00:00", "station_level_pressure": 951.3, "sea_level_pressure": 1012.0}])
     out = ghcnh.parse(raw, "GHCNH:X").set_index("variable")["value"]
     assert out["sp"] == 951.3 and out["msl"] == 1012.0
+
+
+def test_ghcnh_24_hour_precipitation_is_the_gauge_total():
+    raw = ghcnh_frame([{"DATE": "2026-10-13T12:00:00", "precipitation_24_hour": 12.7}])
+    out = ghcnh.parse(raw, "GHCNH:X").set_index("variable")["value"]
+    assert out["pr24"] == 12.7

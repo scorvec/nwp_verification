@@ -113,6 +113,9 @@ PRECIP = Var("tp", "accumulated precipitation", "mm", "surface", grib=("tp", "ap
              standard_names=("precipitation_amount", "lwe_thickness_of_precipitation_amount"),
              aliases=("tp", "apcp", "APCP", "APCP_surface", "total_precipitation", "precip_acc"), lo=0, hi=2000)
 GRIDDED = ("tp",)
+# 24 h totals reported by station gauges (GHCNh precipitation_24_hour), matched to each run's total over the same
+# 24 h (mverify.match): never read from a file, so no file names
+GAUGE = Var("pr24", "24 h precipitation at gauges", "mm", "surface", lo=0, hi=1000)
 
 UPPER = [
     *(_upper("z", lv, "geopotential height", "m", ("gh", "z", "hgt"),
@@ -132,7 +135,7 @@ UPPER = [
       for lv in HUMIDITY_LEVELS),
 ]
 
-CATALOG: dict[str, Var] = {v.name: v for v in [*SURFACE, *UPPER, PRECIP]}
+CATALOG: dict[str, Var] = {v.name: v for v in [*SURFACE, *UPPER, PRECIP, GAUGE]}
 
 # Quantities a model may only provide through components: name -> (components, function).
 DERIVED = {"ws10": (("u10", "v10"), lambda u, v: (u**2 + v**2) ** 0.5)}

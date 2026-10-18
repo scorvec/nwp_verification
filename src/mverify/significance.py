@@ -62,6 +62,23 @@ def paired_test(d: np.ndarray) -> float:
     return float(2 * stats.t.sf(abs(t), df=max(n_eff - 1, 1.0)))
 
 
+def fdr(p: np.ndarray, q: float = 0.10) -> np.ndarray:
+    """Benjamini-Hochberg: which of the p values (NaN = not tested) are discoveries at false-discovery rate q."""
+    p = np.asarray(p, float)
+    out = np.zeros(p.shape, bool)
+    ok = np.isfinite(p)
+    m = int(ok.sum())
+    if m == 0:
+        return out
+    order = np.argsort(p[ok])
+    passed = p[ok][order] <= q * np.arange(1, m + 1) / m
+    k = int(np.flatnonzero(passed).max()) + 1 if passed.any() else 0
+    hit = np.zeros(m, bool)
+    hit[order[:k]] = True
+    out[ok] = hit
+    return out
+
+
 def tests(pairs: pd.DataFrame) -> pd.DataFrame:
     """p values for every ordered pair of models: columns ``BY`` + ``model``, ``reference``, ``runs`` (paired
     runs), ``runs_eff`` (the effective runs the test counts, ``effective_runs``) and ``p``.
