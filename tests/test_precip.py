@@ -166,3 +166,24 @@ def test_imerg_daily_files_are_read_lat_by_lon(tmp_path):
     assert da.dims == ("latitude", "longitude") and da.shape == (lat.size, lon.size)
     assert da.values[-1, 0] == 12.5 and np.isnan(da.values[0, 1])
     assert da.attrs["product"] == "imerg_late" and da.attrs["valid_time"] == "2026-10-16T00:00:00"
+
+
+def test_eccc_precipitation_is_recognised_by_its_wmo_code(tmp_path):
+    eccodes = pytest.importorskip("eccodes")
+    pytest.importorskip("cfgrib")
+    p = tmp_path / "gdps.grib2"
+    h = eccodes.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    eccodes.codes_set_key_vals(h, {"Ni": 36, "Nj": 19, "latitudeOfFirstGridPointInDegrees": 90,
+                                   "longitudeOfFirstGridPointInDegrees": 0, "latitudeOfLastGridPointInDegrees": -90,
+                                   "longitudeOfLastGridPointInDegrees": 350, "iDirectionIncrementInDegrees": 10,
+                                   "jDirectionIncrementInDegrees": 10, "dataDate": 20261001, "dataTime": 0,
+                                   "centre": 54})  # ECCC
+    eccodes.codes_set(h, "productDefinitionTemplateNumber", 8)
+    eccodes.codes_set_key_vals(h, {"discipline": 0, "parameterCategory": 1, "parameterNumber": 8,
+                                   "typeOfStatisticalProcessing": 1, "stepUnits": 1, "startStep": 0, "endStep": 36})
+    eccodes.codes_set_values(h, np.full(36 * 19, 4.0))
+    with open(p, "wb") as fh:
+        eccodes.codes_write(h, fh)
+    eccodes.codes_release(h)
+    (f,) = open_forecast(p).fields
+    assert f.var == "tp" and f.accum == (0 * H, 36 * H) and f.values().mean() == pytest.approx(4.0)
