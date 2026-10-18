@@ -91,6 +91,13 @@ SURFACE = [
 # forecast, attached to every field on the same grid, never scored.
 STATIC = ("orog", "fsr", "lsm")
 
+# Accumulated precipitation is verified grid-to-grid against analyses (mverify.precip), not
+# against station rows. A field of it covers the lead-time window Field.accum.
+PRECIP = Var("tp", "accumulated precipitation", "mm", "surface", grib=("tp", "apcp"), grib_level="surface",
+             standard_names=("precipitation_amount", "lwe_thickness_of_precipitation_amount"),
+             aliases=("tp", "apcp", "APCP", "APCP_surface", "total_precipitation", "precip_acc"), lo=0, hi=2000)
+GRIDDED = ("tp",)
+
 UPPER = [
     *(_upper("z", lv, "geopotential height", "m", ("gh", "z", "hgt"),
              ("geopotential_height", "geopotential"), lo, hi)
@@ -106,7 +113,7 @@ UPPER = [
       for lv in LEVELS),
 ]
 
-CATALOG: dict[str, Var] = {v.name: v for v in SURFACE + UPPER}
+CATALOG: dict[str, Var] = {v.name: v for v in [*SURFACE, *UPPER, PRECIP]}
 
 # Quantities a model may only provide through components: name -> (components, function).
 DERIVED = {"ws10": (("u10", "v10"), lambda u, v: (u**2 + v**2) ** 0.5)}
@@ -152,6 +159,10 @@ def to_canonical(values, unit: str | None, var: Var):
     if var.unit == "1":  # fractions, sometimes given in percent (CMIP sftlf)
         if u in ("%", "percent") or float(values.max()) > 1.5:
             return values / 100.0
+        return values
+    if var.unit == "mm":  # kg m-2 is mm of water; ECMWF accumulates in metres
+        if u in ("m", "m of water equivalent"):
+            return values * 1000.0
         return values
     if var.unit == "m s-1":
         if u in ("kt", "knots", "kts"):

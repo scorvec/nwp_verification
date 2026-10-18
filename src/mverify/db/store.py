@@ -15,6 +15,8 @@ an object is either fully ingested and logged, or not at all.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from importlib import resources
@@ -23,6 +25,7 @@ from pathlib import Path
 import duckdb
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from mverify import variables as V
 from mverify.db import migrations, qc
@@ -51,6 +54,11 @@ def _lit(s: str | os.PathLike) -> str:
 
 def db_path(path: str | os.PathLike | None = None) -> Path:
     return Path(path or os.environ.get("MVERIFY_DB") or DEFAULT_PATH).expanduser()
+
+
+def _grid_root(db: Path) -> str:
+    """Gridded analyses of ``obs.duckdb`` live in ``obs_grids/`` next to it."""
+    return str(db.parent / f"{db.stem}_grids")
 
 
 # --------------------------------------------------------------------------- validation
@@ -117,9 +125,12 @@ def validate_obs(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------- the store
 
 class ObsStore:
-    def __init__(self, con: duckdb.DuckDBPyConnection, read_only: bool = False):
+    def __init__(self, con: duckdb.DuckDBPyConnection, read_only: bool = False, grid_root: str | None = None):
         self.con = con
         self.read_only = read_only
+        # Gridded analyses live as Zarr stores under grid_root; the grids table holds paths relative to it.
+        self.grid_root = grid_root
+        self._temporary_grids = False
 
     # ---- opening
 
@@ -129,17 +140,18 @@ class ObsStore:
         if read_only:
             if not p.exists():
                 raise FileNotFoundError(f"no observation database at {p}; run `mverify db init` first")
-            store = cls(duckdb.connect(str(p), read_only=True), read_only=True)
+            store = cls(duckdb.connect(str(p), read_only=True), read_only=True, grid_root=_grid_root(p))
             store._check_version()
             return store
         p.parent.mkdir(parents=True, exist_ok=True)
-        store = cls(duckdb.connect(str(p)))
+        store = cls(duckdb.connect(str(p)), grid_root=_grid_root(p))
         store._create()
         return store
 
     @classmethod
     def memory(cls) -> ObsStore:
-        store = cls(duckdb.connect(":memory:"))
+        store = cls(duckdb.connect(":memory:"), grid_root=tempfile.mkdtemp(prefix="mverify-grids-"))
+        store._temporary_grids = True
         store._create()
         return store
 
@@ -147,9 +159,10 @@ class ObsStore:
     def snapshot(cls, root: str) -> ObsStore:
         """Read-only views over a published snapshot (local directory or https:// / s3:// URL).
 
-        Layout: ``{root}/stations.parquet``, ``{root}/variables.parquet`` and
-        ``{root}/obs/variable=*/year=*/month=*/*.parquet``. Hive partitioning means
-        a query reads only the variables and months it touches.
+        Layout: ``{root}/stations.parquet``, ``{root}/variables.parquet``,
+        ``{root}/obs/variable=*/year=*/month=*/*.parquet``, and for gridded analyses
+        ``{root}/grids.parquet`` plus the Zarr stores under ``{root}/grids/``. Hive
+        partitioning means a query reads only the variables and months it touches.
         """
         con = duckdb.connect(":memory:")
         if root.startswith(("http://", "https://", "s3://")):
@@ -158,10 +171,18 @@ class ObsStore:
             con.execute(f"CREATE VIEW {t} AS SELECT * FROM read_parquet({_lit(f'{root}/{t}.parquet')})")
         con.execute("CREATE VIEW obs AS SELECT * EXCLUDE (year, month) FROM "
                     f"read_parquet({_lit(f'{root}/obs/*/*/*/*.parquet')}, hive_partitioning = true)")
-        return cls(con, read_only=True)
+        try:
+            con.execute(f"CREATE VIEW grids AS SELECT * FROM read_parquet({_lit(f'{root}/grids.parquet')})")
+        except duckdb.Error:  # a snapshot without gridded analyses
+            con.execute("CREATE VIEW grids AS SELECT NULL::VARCHAR AS product, NULL::VARCHAR AS variable, "
+                        "NULL::SMALLINT AS accum_hours, NULL::TIMESTAMP AS valid_time, NULL::VARCHAR AS uri "
+                        "WHERE false")
+        return cls(con, read_only=True, grid_root=f"{root}/grids")
 
     def close(self) -> None:
         self.con.close()
+        if self._temporary_grids:
+            shutil.rmtree(self.grid_root, ignore_errors=True)
 
     def __enter__(self):
         return self
@@ -345,6 +366,43 @@ class ObsStore:
                  for key, version, rows_in in objects])
         return n
 
+    # ---- gridded analyses
+
+    def add_grid(self, da: xr.DataArray) -> str:
+        """Store one analysis window (see mverify.precip.analyses) and catalogue it; returns its uri."""
+        self._require_writable()
+        product, hours = str(da.attrs["product"]), int(da.attrs["accum_hours"])
+        valid = pd.Timestamp(da.attrs["valid_time"])
+        if valid != valid.floor("h"):
+            raise ValidationError(f"{product}: window end {valid} is not a whole hour")
+        uri = f"{product}/{hours}h/{valid:%Y/%Y%m%d%H}.zarr"
+        dest = Path(self.grid_root) / uri
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        shutil.rmtree(tmp, ignore_errors=True)
+        da.astype("float32").to_dataset(name="tp").to_zarr(tmp, mode="w", consolidated=False)
+        shutil.rmtree(dest, ignore_errors=True)
+        tmp.rename(dest)
+        self.con.execute("INSERT OR REPLACE INTO grids VALUES (?, 'tp', ?, ?, ?)",
+                         [product, hours, valid.to_pydatetime(), uri])
+        return uri
+
+    def grid_times(self, product: str, accum_hours: int, start, end) -> list[pd.Timestamp]:
+        rows = self.con.execute(
+            "SELECT valid_time FROM grids WHERE product = ? AND variable = 'tp' AND accum_hours = ? "
+            "AND valid_time BETWEEN ? AND ? ORDER BY 1",
+            [product, accum_hours, pd.Timestamp(start).to_pydatetime(), pd.Timestamp(end).to_pydatetime()]).fetchall()
+        return [pd.Timestamp(r[0]) for r in rows]
+
+    def get_grid(self, product: str, accum_hours: int, valid_time) -> xr.DataArray | None:
+        row = self.con.execute(
+            "SELECT uri FROM grids WHERE product = ? AND variable = 'tp' AND accum_hours = ? AND valid_time = ?",
+            [product, accum_hours, pd.Timestamp(valid_time).to_pydatetime()]).fetchone()
+        if row is None:
+            return None
+        with xr.open_zarr(f"{self.grid_root}/{row[0]}", consolidated=False) as ds:
+            return ds["tp"].load()
+
     def check_integrity(self) -> dict[str, int]:
         """Counts of rows breaking each rule the schema does not enforce itself; all zero when healthy."""
         q = {
@@ -421,8 +479,10 @@ class ObsStore:
         """Write the snapshot layout read by ``ObsStore.snapshot``."""
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
-        for t in ("stations", "variables"):
+        for t in ("stations", "variables", "grids"):
             self.con.execute(f"COPY {t} TO {_lit(root / (t + '.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+        if self.grid_root and Path(self.grid_root).is_dir():
+            shutil.copytree(self.grid_root, root / "grids", dirs_exist_ok=True)
         self.con.execute(
             "COPY (SELECT *, year(valid_time) AS year, month(valid_time) AS month FROM obs "
             "ORDER BY variable, valid_time, station_id) "

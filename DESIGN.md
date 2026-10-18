@@ -242,14 +242,45 @@ and scored in 4 s using 2.3 GB. Pairs are held in memory as one long table; for 
 station set a 51-member ensemble reaches about 10^8 pairs, so the next step is scoring each
 init and lead as it is matched instead of after.
 
-## 4. Precipitation analyses (planned)
+## 4. Precipitation analyses (`src/mverify/precip/`)
 
-Precipitation is verified grid-to-grid: analyses (Stage IV 6/24 h, MRMS QPE 1-24 h, CCPA, IMERG)
-are stored as Zarr on their native grids and catalogued in `grids`; model accumulations are
-derived from the file (running totals differenced, rates integrated) and regridded
-conservatively to the analysis grid. Scores: FSS over neighbourhood sizes, ETS / frequency bias /
-POD / FAR at fixed thresholds, and spatial bias. Station precipitation from GHCNh is used only
-where its accumulation period is unambiguous.
+Precipitation is verified grid-to-grid, on the analysis grid, so every model is judged on the
+same cells.
+
+| product | coverage | window | source |
+|---|---|---|---|
+| `stageiv` | CONUS, ~4.8 km polar stereographic | 24 h ending 12Z | NCEP Stage IV (radar + gauges, RFC quality control), Iowa Environmental Mesonet archive, no login |
+| `gpcp` | global, 0.5° | 24 h ending 00Z | GPCP V3.3 daily, NASA GES DISC, Earthdata login; the successor of the V3.2 climatology behind the scorvec.com rain bias correction |
+
+* **Storage.** `mverify db precip --start ... --product stageiv gpcp` stores each window unchanged
+  as a small Zarr store in `obs_grids/` next to the database and catalogues it in `grids`. The
+  snapshot carries `grids.parquet` and the stores, so users still download nothing.
+* **Model totals** (`accum.py`). Files hold running totals (ECMWF, ERA5, the GFS 0-N h field),
+  buckets (GFS 6 h, HRRR 1 h) or both. The window is built directly, as the difference of two
+  totals with the same start, or by chaining contiguous buckets; differences are clipped at 0.
+  GRIB files with two accumulations of one field (GFS: 0-30 h and 24-30 h) are opened one
+  `startStep` at a time, because cfgrib otherwise keeps one and silently drops the other. In
+  netCDF/Zarr an accumulation is taken as running from the init, the common convention.
+* **Regridding** (`regrid.py`). Coarsening (0.25° model onto 0.5° GPCP) averages every model
+  cell inside an analysis cell, area-weighted, which conserves water; refining (GFS onto Stage IV)
+  interpolates bilinearly. The choice follows the two grid spacings.
+* **Scores** (`scores.py`). ETS, frequency bias, POD and FAR at 1, 5, 10, 25 and 50 mm/24 h;
+  FSS at 50, 100, 200 and 400 km; mean forecast and analysed amounts, bias, MAE, RMSE. All of
+  them are built from sums that add across windows and inits, so a season is scored exactly
+  instead of as an average of daily scores. Cells are area-weighted, and cells the analysis
+  does not cover are left out, including from the neighbourhood fractions. On the lat/lon GPCP
+  grid a neighbourhood is n x n cells with n from the latitude spacing, so it narrows in
+  longitude towards the poles. An ensemble is scored through its member mean for now.
+* **Results** join the station table: `network` is the product, `variable` is `tp24` for
+  amounts and `tp24>=10mm` for a threshold, and `lead_h` is the lead at the end of the window.
+  On the GFS run of 2026-10-13 00Z against Stage IV for the 24 h ending 14 Oct 12Z (36 h lead):
+  ETS 0.41 / 0.38 / 0.29 / 0.02 at 1 / 10 / 25 / 50 mm, frequency bias 1.33 at 1 mm and 0.13 at
+  50 mm (too much light rain, too little heavy rain), FSS at 10 mm from 0.69 (50 km) to 0.91
+  (400 km).
+* **Latency.** Stage IV is final within about a day. GPCP V3.3 daily currently ends at
+  2025-12-31, and NOAA's GPCP daily CDR (v1.3, 1°, on AWS) runs about 2.5 months behind, so
+  global scores of recent forecasts need a faster analysis. IMERG Late, which GPCP V3 is built
+  on, is the candidate.
 
 ## 5. Feeding scorvec.com
 
@@ -296,6 +327,7 @@ src/mverify/
   match.py            forecast/observation pairing
   scores.py           verification scores
   report.py           scorecard JSON and tables
+  precip/             precipitation analyses, model totals, regridding and grid scores
   verify.py           one-call API
   cli.py              command line
 tests/                pytest suite (tests/data: the v1 schema, for the migration test)

@@ -10,6 +10,7 @@ from mverify import scores
 from mverify.db.store import ObsStore
 from mverify.io.open import Forecast, open_forecast
 from mverify.match import MAX_DZ, T_HEIGHT_RANGE, match
+from mverify.precip.verify import verify_precip
 from mverify.report import scorecard
 
 
@@ -44,10 +45,16 @@ def verify(forecasts: dict[str, list] | list | str, store: ObsStore | None = Non
         pairs = pd.concat([match(fc, store, variables, networks=networks, height_correction=height_correction,
                                  max_dz=max_dz, t_height_range=t_height_range)
                            for fc in fcs], ignore_index=True)
+        precip = [verify_precip(fc, store, regions=regions) for fc in fcs
+                  if not variables or any(v.startswith("tp") for v in variables)]
     finally:
         if own:
             store.close()
-    return score_pairs(pairs, regions, fcs)
+    result = score_pairs(pairs, regions, fcs)
+    precip = [t for t in precip if not t.empty]
+    if precip:
+        result.table = pd.concat([result.table, *precip], ignore_index=True)
+    return result
 
 
 def score_pairs(pairs: pd.DataFrame, regions: list[str] | None = None, fcs: list[Forecast] = ()) -> Result:

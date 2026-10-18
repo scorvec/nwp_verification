@@ -112,6 +112,7 @@ class Field:
     _unit: str | None = field(default=None, repr=False)
     source: str = ""
     _stack: tuple[_MemberStack, int] | None = field(default=None, repr=False)  # (stack, position in it)
+    accum: tuple[pd.Timedelta, pd.Timedelta] | None = None  # (start, end) lead of an accumulation
 
     @property
     def valid(self) -> pd.Timestamp:
@@ -184,13 +185,42 @@ def _open(path: Path, fmt: str) -> list[xr.Dataset]:
         warnings.simplefilter("ignore")
         if fmt == "grib":
             import cfgrib
-            return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": ""})
+            starts, instant = _accumulation_starts(path)
+            if len(starts) <= 1:
+                return cfgrib.open_datasets(str(path), backend_kwargs={"indexpath": "", "read_keys": ["startStep"]})
+            # Several accumulations of one field (GFS: 0-30 h and 24-30 h) collide in cfgrib, which
+            # keeps one silently; open each start separately and everything else once.
+            out = list(cfgrib.open_datasets(str(path), backend_kwargs={
+                "indexpath": "", "filter_by_keys": {"stepType": "instant"}})) if instant else []
+            for s in starts:
+                out += cfgrib.open_datasets(str(path), backend_kwargs={
+                    "indexpath": "", "read_keys": ["startStep"],
+                    "filter_by_keys": {"stepType": "accum", "startStep": s}})
+            return [ds for ds in out if ds.data_vars]
         if fmt == "netcdf":
             try:
                 return [xr.open_dataset(path, decode_timedelta=True)]
             except ValueError:
                 return [xr.open_dataset(path, decode_times=False)]
         return [xr.open_zarr(path, consolidated=None, decode_timedelta=True)]
+
+
+def _accumulation_starts(path: Path) -> tuple[list[int], bool]:
+    """Distinct startStep values of the accumulated messages in a GRIB file, and whether it holds
+    any instantaneous message (headers only)."""
+    import eccodes
+    starts: set[int] = set()
+    instant = False
+    with open(path, "rb") as fh:
+        while (gid := eccodes.codes_grib_new_from_file(fh)) is not None:
+            try:
+                if eccodes.codes_get(gid, "stepType") == "accum":
+                    starts.add(int(eccodes.codes_get(gid, "startStep")))
+                else:
+                    instant = True
+            finally:
+                eccodes.codes_release(gid)
+    return sorted(starts), instant
 
 
 # --------------------------------------------------------------------------- coordinates
@@ -335,7 +365,7 @@ def identify(name: str, da: xr.DataArray, has_level: bool) -> str | None:
         return m
     if tol == "surface" and (short in ("orog", "z", "hgt", "gh") or low in ("orog", "z", "hgt")):
         return "orog"
-    for v in V.SURFACE:
+    for v in (*V.SURFACE, V.PRECIP):
         if v.name == "orog":
             if low in (a.lower() for a in v.aliases if a not in ("HGT",)) or std in v.standard_names:
                 return "orog"
@@ -345,7 +375,7 @@ def identify(name: str, da: xr.DataArray, has_level: bool) -> str | None:
     if std:
         hag = da.coords.get("heightAboveGround", da.coords.get("height"))
         h = float(np.atleast_1d(hag.values)[0]) if hag is not None else None
-        for v in V.SURFACE:
+        for v in (*V.SURFACE, V.PRECIP):
             if std in v.standard_names and v.name != "orog":
                 if v.name in ("t2m", "td2m") and h not in (None, 2.0):
                     continue
@@ -419,7 +449,7 @@ def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, static: dict)
                 init, lead = _field_time(sub, mode, idim, ldim, init_c, lead_c)
                 if init is not None:
                     fields.append(Field(vname, init, lead, None, grid, sub.transpose(ydim, xdim), unit,
-                                        source=f"{path.name}:{fmt}"))
+                                        source=f"{path.name}:{fmt}", accum=_accum(vname, sub, lead)))
                 continue
             init, lead = _field_time(sub.isel({mdim: 0}), mode, idim, ldim, init_c, lead_c)
             if init is None:
@@ -428,8 +458,22 @@ def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, static: dict)
             for k in range(sub.sizes[mdim]):
                 m = sub.isel({mdim: k})
                 fields.append(Field(vname, init, lead, int(m[mdim].values) if mdim in m.coords else k, grid,
-                                    m.transpose(ydim, xdim), unit, source=f"{path.name}:{fmt}", _stack=(stack, k)))
+                                    m.transpose(ydim, xdim), unit, source=f"{path.name}:{fmt}", _stack=(stack, k),
+                                    accum=_accum(vname, m, lead)))
     return fields
+
+
+def _accum(vname: str, da: xr.DataArray, lead: pd.Timedelta) -> tuple[pd.Timedelta, pd.Timedelta] | None:
+    """Lead-time window of an accumulated field: GRIB startStep when known, else since the init.
+
+    netCDF/Zarr files rarely say; a running total from the start of the forecast is the
+    convention of ECMWF, ERA5, GFS converted with wgrib2 -netcdf and most model output.
+    """
+    if vname not in V.GRIDDED:
+        return None
+    start = da.attrs.get("GRIB_startStep")
+    unit = {0: "min", 1: "h", 2: "D", 10: "3h", 11: "6h", 12: "12h", 13: "s"}.get(da.attrs.get("GRIB_stepUnits", 1), "h")
+    return (pd.Timedelta(0) if start is None else pd.Timedelta(int(start) * pd.Timedelta(f"1{unit}")), lead)
 
 
 def _field_time(sub: xr.DataArray, mode, idim, ldim, init_c, lead_c):

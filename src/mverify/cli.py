@@ -11,6 +11,11 @@ from mverify import __version__
 from mverify.match import MAX_DZ
 
 
+def pd_now():
+    import pandas as pd
+    return pd.Timestamp.now("UTC").tz_localize(None)
+
+
 def _optional_float(s: str) -> float | None:
     return None if s.lower() in ("none", "off") else float(s)
 
@@ -103,6 +108,13 @@ def cmd_db(a) -> int:
             from mverify.ingest import soundings
             n = soundings.ingest(s, root=a.root, since=a.since, bbox=_bbox(a.bbox))
             print(f"{n} rows written")
+        elif a.db_cmd == "precip":
+            from mverify.db.store import db_path
+            from mverify.precip import analyses
+            end = a.end or pd_now()
+            for product in a.product:
+                n = analyses.ingest(s, product, a.start, end, db_path(a.db).parent / "cache")
+                print(f"{product}: {n} windows added")
         elif a.db_cmd == "sensors":
             import pandas as pd
             n, unmatched = s.set_sensor_heights(pd.read_csv(a.file, dtype=str))
@@ -162,6 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--root", default=None, help="mirror URL or local checkout of the skewt-data branch")
     r.add_argument("--since", help="only ascents at or after this time")
     r.add_argument("--bbox")
+    pr = dsub.add_parser("precip", help="add precipitation analyses (Stage IV over CONUS, GPCP globally)")
+    pr.add_argument("--product", nargs="+", default=["stageiv", "gpcp"], choices=["stageiv", "gpcp"])
+    pr.add_argument("--start", required=True, help="first window end, e.g. 2026-10-01")
+    pr.add_argument("--end", help="last window end (default now)")
     sn = dsub.add_parser("sensors", help="load thermometer and anemometer heights from a CSV")
     sn.add_argument("file", help="CSV with one of station_id / wmo / icao, and t_height_m and/or wind_height_m")
     e = dsub.add_parser("export", help="write the Parquet snapshot")

@@ -24,6 +24,7 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 | surface stations (GHCNh) | 2 m temperature and dew point, sea-level pressure, 10 m wind (u, v, speed, vector) | bias, MAE, RMSE, error SD, correlation |
 | radiosondes | height, temperature and wind at 1000-200 hPa | same, plus vector wind RMSE |
 | ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill |
+| precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE |
 
 Every score also has an observation-error-aware version (`rmse_oc`, `crps_oe`, `ssr_oe`). Radiosonde
 levels are matched where the balloon drifted to. Surface stations more than 100 m from the model terrain
@@ -39,6 +40,7 @@ mverify db status                         rows, stations and time span per varia
 mverify db ghcnh --year 2026 --bbox conus build or update surface observations
 mverify db soundings                      build or update radiosonde levels
 mverify db sensors FILE.csv               load thermometer / anemometer heights
+mverify db precip --start 2026-10-01      add Stage IV and GPCP analyses (GPCP needs EARTHDATA_USERNAME/PASSWORD)
 mverify db init                           create a database, or upgrade an older one
 mverify db export DIR                     write the Parquet snapshot users query
 ```

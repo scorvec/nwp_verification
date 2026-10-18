@@ -89,7 +89,7 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
     """
     have = set(fc.variables())
     derivable = {name for name, (parts, _) in V.DERIVED.items() if set(parts) <= have and name not in have}
-    wanted = sorted((have | derivable) - set(V.STATIC))
+    wanted = sorted((have | derivable) - set(V.STATIC) - set(V.GRIDDED))
     if variables:
         wanted = [v for v in wanted if v in variables]
     if not wanted or not fc.fields:
