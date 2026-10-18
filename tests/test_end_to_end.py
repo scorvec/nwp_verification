@@ -34,6 +34,18 @@ def test_stations_far_from_the_model_terrain_are_left_out(tmp_path, filled_store
     assert (t2m["dz_m"] == -300).all()
 
 
+def test_models_are_compared_on_the_pairs_they_all_have(tmp_path, filled_store, forecast_ds):
+    # Flat terrain keeps the 300 m station; terrain at 400 m keeps the 300 m and 500 m ones.
+    forecast_ds.to_netcdf(tmp_path / "flat.nc")
+    forecast_ds.assign(orog=forecast_ds["orog"] + 400).to_netcdf(tmp_path / "high.nc")
+    models = {"FLAT": [tmp_path / "flat.nc"], "HIGH": [tmp_path / "high.nc"]}
+    common = verify(models, filled_store, regions=["conus"], max_dz=300)
+    assert set(common.pairs["station_id"]) == {"GHCNH:B"}
+    assert (common.table["n"] == 1).all() and set(common.table["model"]) == {"FLAT", "HIGH"}
+    own = verify(models, filled_store, regions=["conus"], max_dz=300, common=False).table
+    assert own.groupby("model")["n"].max().to_dict() == {"FLAT": 1, "HIGH": 2}
+
+
 def test_known_bias_and_the_same_answer_from_every_format(tmp_path, filled_store, forecast_ds):
     warm = forecast_ds.copy()
     warm["t2m"] = warm["t2m"] + 1.5

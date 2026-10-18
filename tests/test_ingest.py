@@ -195,3 +195,17 @@ def test_earthdata_login_follows_the_data_server_redirect(monkeypatch):
     monkeypatch.setenv("EARTHDATA_PASSWORD", "wrong")
     with pytest.raises(PermissionError, match="Invalid username or password"):
         H.get("https://data.example.gov/f.nc4", opener=opener())
+
+
+def test_a_station_year_without_usable_reports_passes_qc():
+    raw = pd.DataFrame({c: pd.Series([], dtype=object) for c in ghcnh.COLUMNS})
+    assert qc.run_surface(ghcnh.parse(raw, "GHCNH:X")).empty
+
+
+def test_a_limited_station_sample_is_spread_over_the_map():
+    sl = pd.DataFrame({"GHCN_ID": ["AA1", "AA2", "AA3", "ZZ1"], "LATITUDE": [10.1, 10.5, 10.9, 50.0],
+                       "LONGITUDE": [20.1, 20.3, 20.5, 5.0], "WMO_ID": ["1", None, "3", None],
+                       "ICAO": ["A", None, "C", None]})
+    # one per 2-degree box first (the WMO/ICAO station in a box before the others), then the rest
+    assert ghcnh.select(sl, 2)["GHCN_ID"].tolist() == ["AA1", "ZZ1"]
+    assert ghcnh.select(sl, 3)["GHCN_ID"].tolist() == ["AA1", "ZZ1", "AA3"]

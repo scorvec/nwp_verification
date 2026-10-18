@@ -11,8 +11,12 @@ value at that lead).
       "inits": {"GFS": ["2026-10-13T00", ...]},
       "rows": [{"key": "ghcnh:t2m:conus", "var": "t2m", "label": "2 m temperature",
                 "truth": "surface stations (GHCNh)", "region": "CONUS", "unit": "degC",
-                "scores": {"GFS": {"rmse": [...], "bias": [...], "mae": [...], "n": [...]}}}]
+                "scores": {"GFS": {"rmse": [...], "bias": [...], "mae": [...], "n": [...]}},
+                "p": {"IFS|GFS": [...]}}]
     }
+
+``p`` holds, for each ordered pair of models, the p value per lead of the paired test that
+their mean squared errors differ (``mverify.significance``); it is absent with one model.
 """
 
 from __future__ import annotations
@@ -54,9 +58,12 @@ def _clean(x):
     return round(float(x), 4) if not isinstance(x, (int,)) else x
 
 
-def scorecard(table: pd.DataFrame, inits: dict[str, list[str]]) -> dict:
-    """``table``: one row per model x network x variable x region x lead_h with score columns."""
+def scorecard(table: pd.DataFrame, inits: dict[str, list[str]], tests: pd.DataFrame | None = None) -> dict:
+    """``table``: one row per model x network x variable x region x lead_h with score columns;
+    ``tests``: the output of ``mverify.significance.tests`` for the same pairs."""
     leads = sorted(table["lead_h"].unique().tolist())
+    by_row = ({} if tests is None or tests.empty
+              else {k: g for k, g in tests.groupby(["network", "variable", "region"], sort=False)})
     rows = []
     for (net, var, region), g in table.groupby(["network", "variable", "region"], sort=True):
         key, truth = TRUTH.get(net, (net.lower(), net))
@@ -66,8 +73,12 @@ def scorecard(table: pd.DataFrame, inits: dict[str, list[str]]) -> dict:
             m = m.set_index("lead_h").reindex(leads)
             scores[model] = {s: [_clean(v) if s != "n" else (None if pd.isna(v) else int(v)) for v in m[s]]
                              for s in STATS if s in m and m[s].notna().any()}
-        rows.append({"key": f"{key}:{var}:{region}", "var": var, "label": label, "truth": truth,
-                     "region": REGION_LABELS.get(region, region), "unit": unit, "scores": scores})
+        row = {"key": f"{key}:{var}:{region}", "var": var, "label": label, "truth": truth,
+               "region": REGION_LABELS.get(region, region), "unit": unit, "scores": scores}
+        if (t := by_row.get((net, var, region))) is not None:
+            row["p"] = {f"{a}|{b}": [_clean(v) for v in g.set_index("lead_h")["p"].reindex(leads)]
+                        for (a, b), g in t.groupby(["model", "reference"], sort=True)}
+        rows.append(row)
     return {"generated": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"),
             "package": f"mverify {__version__}", "models": sorted(table["model"].unique().tolist()),
             "leads": [int(x) if float(x).is_integer() else x for x in leads], "inits": inits, "rows": rows}

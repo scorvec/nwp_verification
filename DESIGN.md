@@ -184,10 +184,18 @@ to two decimals at every lead.
   spread and spread/skill; the observation-error-aware scores below; bootstrap CIs resampling
   whole valid times (stations at one time are correlated, so resampling stations would
   overstate confidence). Regions: global, NH, tropics, SH, CONUS, North America, Europe.
+* **One sample for all models** (`verify.common_sample`): with several models, each is scored
+  only on the observations every model was matched to at the same init and lead. Models lose
+  different pairs (the terrain cut follows each model's orography, the land-only
+  interpolation its land-sea mask), so without this their scores are not comparable.
+  `--all-pairs` turns it off.
+* **Significance** (`significance.py`): for every ordered pair of models, a paired t-test on
+  the per-run mean squared errors, with the variance inflated for lag-1 autocorrelation of
+  the run-to-run differences (Geer 2016), since runs a day apart share their weather. The
+  p values go into the scorecard JSON as `p`, so a page can colour only differences that
+  hold up.
 * **Planned**: anomaly correlation against station climatologies (the `skewt-climo` medians
-  your AIFS page already uses), categorical scores for precipitation, significance tests for
-  model-vs-model differences (paired, with the same block bootstrap), diurnal-cycle and
-  per-station bias maps.
+  your AIFS page already uses), diurnal-cycle and per-station bias maps.
 
 ### Making observations and the model comparable
 
@@ -304,7 +312,7 @@ Recommended wiring, matching how the site's other products are built:
 * a verification page fetches that JSON and draws lead-time curves and a scorecard grid.
 
 This keeps the package independent of the site (anyone can run it) while the site stays a
-consumer, like it is of `quantmet`. Nothing in `scorvec.github.io` has been changed.
+consumer, like it is of `quantmet`. The page is `verification.html` on the site.
 
 ## 6. Code quality
 

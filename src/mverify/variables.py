@@ -64,7 +64,7 @@ SURFACE = [
         lo=-90, hi=40, sigma_o=1.6),
     Var("msl", "mean sea-level pressure", "hPa", "surface", grib=("prmsl", "msl", "mslet"),
         grib_level="meanSea", standard_names=("air_pressure_at_mean_sea_level", "air_pressure_at_sea_level"),
-        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=850, hi=1090,
+        aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=870, hi=1090,
         sigma_o=1.0),
     Var("u10", "10 m zonal wind", "m s-1", "surface", grib=("10u", "u10"), grib_level="heightAboveGround",
         standard_names=("eastward_wind",), aliases=("u10", "10u", "U10", "uas", "UGRD_10maboveground"),
