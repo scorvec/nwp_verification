@@ -13,6 +13,8 @@ ensemble members on its own, interpolates every field to the stations that obser
 time, and scores it. The observations come from a database of quality-controlled surface
 stations (GHCNh) and radiosondes that is built and kept current centrally.
 
+Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification). The Python package and command are named `mverify`.
+
 **Status: prototype.** See [DESIGN.md](DESIGN.md) for the architecture and the plan.
 
 ## What it scores today

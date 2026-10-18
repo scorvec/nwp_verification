@@ -18,6 +18,9 @@ dependencies = [
     "pyarrow>=14",
 ]
 
+[project.urls]
+Homepage = "https://github.com/scorvec/nwp_verification"
+
 [project.optional-dependencies]
 grib = ["cfgrib>=0.9.10", "eccodes>=1.6"]
 netcdf = ["netCDF4>=1.6", "h5netcdf>=1.2"]
