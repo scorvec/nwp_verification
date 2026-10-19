@@ -15,7 +15,10 @@ Making the two sides comparable:
     ridge, sheltered vs exposed wind) and no lapse rate fixes that. Pairs whose
     dz_m is unknown (no orography in the files) are kept. Surface pressure is
     compared unadjusted, so its cut is MAX_DZ_PRESSURE (5 m, about 0.6 hPa at
-    sea level) and a pair with unknown dz_m is dropped.
+    sea level) and a pair with unknown dz_m is dropped. Mean sea-level pressure
+    is reduced to sea level through the ground under the station, a reduction
+    each model makes its own way and that grows with height, so its pairs also
+    need model terrain of at most MAX_TERRAIN_MSL (500 m) at the station.
   * sensor height: an anemometer not at 10 m is brought to 10 m with the
     neutral log wind profile, u(10)/u(h) = ln(10/z0)/ln(h/z0), with z0 from the
     model's surface roughness when the file has it, else Z0_DEFAULT. A
@@ -57,6 +60,7 @@ MAX_DZ = 100.0       # m, largest model-station terrain difference for surface p
 # m, the same for surface pressure, which falls ~0.12 hPa per metre near sea level and is not moved to the station
 # height: 5 m keeps the mismatch (<= 0.6 hPa) within the observation error and well below a day-1 forecast error
 MAX_DZ_PRESSURE = 5.0
+MAX_TERRAIN_MSL = 500.0  # m, highest model terrain at a station whose mean sea-level pressure is scored
 T_HEIGHT_RANGE = (1.25, 2.5)  # m, WMO siting range for thermometers
 Z0_DEFAULT = 0.03    # m, roughness of open short grass, the WMO reference exposure
 WIND_10M = ("u10", "v10", "ws10")
@@ -160,9 +164,8 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
         fcst = interp(f, surface)(values_fn(), which)
         o = g["value"].to_numpy(float)
         lf = land_frac[f.grid.key][which] if surface and f.grid.key in land_frac else np.full(len(which), np.nan)
-        dz = np.full(len(which), np.nan)
-        if surface and f.grid.key in model_z:
-            dz = model_z[f.grid.key][which] - g["elev_m"].to_numpy(float)
+        zm = model_z[f.grid.key][which] if surface and f.grid.key in model_z else np.full(len(which), np.nan)
+        dz = zm - g["elev_m"].to_numpy(float)
         if var == "t2m" and height_correction:
             fcst = fcst + LAPSE * np.nan_to_num(dz)
         sensor_h = np.full(len(which), np.nan)
@@ -179,6 +182,8 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
             ok &= np.abs(dz) <= min(max_dz, MAX_DZ_PRESSURE)  # unknown dz (NaN) is dropped: no height check
         elif surface and max_dz is not None:
             ok &= ~(np.abs(dz) > max_dz)  # unknown dz (NaN) is kept
+            if var == "msl":
+                ok &= zm <= MAX_TERRAIN_MSL  # unknown model terrain (NaN) is dropped
         if not ok.any():
             return
         out.append(pd.DataFrame({

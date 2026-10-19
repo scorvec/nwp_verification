@@ -151,3 +151,20 @@ def test_gauge_pairs_score_beside_wind_pairs(tmp_path, store, init):
     fc = open_forecast(tmp_path / "w.nc")
     table = score_pairs(M.match(fc, store, max_dz=None), None, [fc]).table
     assert {"pr24", "wind10"} <= set(table["variable"])
+
+
+def test_sea_level_pressure_only_below_500_m_of_model_terrain(tmp_path, store, init):
+    # Model terrain 300 m in the west, 800 m in the east of 260E; both stations sit on their model terrain.
+    store.upsert_stations(pd.DataFrame({"station_id": ["GHCNH:LOW", "GHCNH:HIGH"], "network": "GHCNH",
+                                        "lat": [40.2, 40.2], "lon": [-110.3, -90.3], "elev_m": [300.0, 800.0]}))
+    high = lambda la, lo: np.where(lo < 260, 300.0, 800.0)
+    _grid_ds(init, msl=(lambda la, lo: np.full(la.shape, 101500.0), {"units": "Pa"}, False),
+             t2m=(lambda la, lo: np.full(la.shape, 283.15), {"units": "K"}, False),
+             orog=(high, {"units": "m"}, True)).to_netcdf(tmp_path / "m.nc")
+    store.upsert_obs(pd.DataFrame([{"station_id": s, "valid_time": init, "variable": v, "value": x, "source": "test"}
+                                   for s in ("GHCNH:LOW", "GHCNH:HIGH") for v, x in (("msl", 1015.0), ("t2m", 10.0))]))
+    p = M.match(open_forecast(tmp_path / "m.nc", init=init), store)
+    assert sorted(p.loc[p["variable"] == "msl", "station_id"]) == ["GHCNH:LOW"]
+    assert sorted(p.loc[p["variable"] == "t2m", "station_id"]) == ["GHCNH:HIGH", "GHCNH:LOW"]  # only pressure is cut
+    assert sorted(M.match(open_forecast(tmp_path / "m.nc", init=init), store, max_dz=None)
+                  .query("variable == 'msl'")["station_id"]) == ["GHCNH:HIGH", "GHCNH:LOW"]  # max_dz=None keeps all
