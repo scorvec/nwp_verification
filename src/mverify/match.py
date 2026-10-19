@@ -186,7 +186,10 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
             "valid_time": f.valid, "station_id": g["station_id"].to_numpy()[ok],
             "network": g["network"].to_numpy()[ok], "lat": g["lat"].to_numpy()[ok], "lon": g["lon"].to_numpy()[ok],
             "variable": var, "fcst": fcst[ok], "obs": o[ok], "dz_m": dz[ok], "dt_min": g["dt_min"].to_numpy()[ok],
-            "sensor_h_m": sensor_h[ok], "land_frac": lf[ok], "sigma_o": V.CATALOG[var].sigma_o}))
+            "sensor_h_m": sensor_h[ok], "land_frac": lf[ok],
+            # NaN, not None, where a variable has no observation error: one None makes the column object-typed
+            # in every concatenation of pairs, and the scores' arithmetic on it fails
+            "sigma_o": np.nan if V.CATALOG[var].sigma_o is None else V.CATALOG[var].sigma_o}))
 
     for f in fc.fields:
         if f.var in wanted:

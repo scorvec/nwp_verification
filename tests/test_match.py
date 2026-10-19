@@ -129,3 +129,25 @@ def test_a_gauge_total_is_paired_with_the_run_total_over_the_same_24_hours(tmp_p
     g = p[p["variable"] == "pr24"]
     assert len(g) == 1 and g["lead_h"].iloc[0] == 36  # 12-36 h; the run cannot give 36-60 h
     assert g["fcst"].iloc[0] == pytest.approx(8.0) and g["obs"].iloc[0] == 10.0
+    assert p["sigma_o"].dtype == float  # no observation error for gauges is NaN, never an object column
+
+
+def test_gauge_pairs_score_beside_wind_pairs(tmp_path, store, init):
+    # A variable without an observation error (pr24) scored together with the 10 m wind: the vector-wind scores
+    # once failed on the object column a None sigma_o made.
+    from mverify.verify import score_pairs
+    store.upsert_stations(pd.DataFrame({"station_id": ["GHCNH:G"], "network": "GHCNH", "lat": [40.2],
+                                        "lon": [-100.3], "elev_m": [0.0]}))
+    lat, lon = np.arange(60.0, 19.9, -0.5), np.arange(220.0, 300.01, 0.5)
+    full = lambda v: np.full((1, 2, lat.size, lon.size), v)
+    xr.Dataset({"tp": (("time", "step", "latitude", "longitude"), np.concatenate([full(3.0)[:, :1], full(11.0)[:, :1]], 1),
+                       {"units": "mm"}),
+                "u10": (("time", "step", "latitude", "longitude"), full(2.0), {"units": "m s-1"}),
+                "v10": (("time", "step", "latitude", "longitude"), full(1.0), {"units": "m s-1"})},
+               coords={"time": [init], "step": pd.to_timedelta([12, 36], unit="h"), "latitude": lat,
+                       "longitude": lon}).to_netcdf(tmp_path / "w.nc")
+    store.upsert_obs(pd.DataFrame([{"station_id": "GHCNH:G", "valid_time": init + pd.Timedelta(36, "h"), "variable": v,
+                                    "value": x, "source": "test"} for v, x in (("pr24", 10.0), ("u10", 1.0), ("v10", 0.0))]))
+    fc = open_forecast(tmp_path / "w.nc")
+    table = score_pairs(M.match(fc, store, max_dz=None), None, [fc]).table
+    assert {"pr24", "wind10"} <= set(table["variable"])
