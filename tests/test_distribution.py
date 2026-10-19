@@ -45,7 +45,7 @@ def test_a_model_too_weak_by_a_fifth_is_flagged_and_a_fair_one_is_not():
     assert weak["q_hi"][i90] < 0 and weak["c_hi"] < 0  # its 90th percentile and scale are significantly low
     assert weak["ratio_hi"][out["thresholds"].index(10.0)] < 1  # and it reaches 10 m/s too rarely
     assert fair["q_lo"][out["probs"].index(0.5)] <= 0 <= fair["q_hi"][out["probs"].index(0.5)]
-    assert fair["k_lo"] <= 0 <= fair["k_hi"]
+    assert fair["k_lo"] <= 0 <= fair["k_hi"] and fair["calm_lo"] <= 0 <= fair["calm_hi"]
     json.dumps(out, allow_nan=False)
 
 

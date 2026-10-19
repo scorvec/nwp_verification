@@ -84,7 +84,7 @@ def compare(pairs: pd.DataFrame, variable: str = "ws10", regions: list[str] | No
             probs=PROBS, thresholds=THRESHOLDS, n_boot: int = N_BOOT, level: float = LEVEL, seed: int = 0) -> dict:
     """The comparison as a JSON-ready dict: ``rows`` per region and lead group, each with the observed statistics
     (``obs``: q, k, c, calm, exceed) and per model the same plus bootstrap intervals for q - q_obs (``q_lo``,
-    ``q_hi``), k - k_obs, c - c_obs and exceed / exceed_obs (``ratio_lo``, ``ratio_hi``)."""
+    ``q_hi``), k - k_obs, c - c_obs, calm - calm_obs and exceed / exceed_obs (``ratio_lo``, ``ratio_hi``)."""
     p = pairs[(pairs["variable"] == variable) & pairs["fcst"].notna() & pairs["obs"].notna()]
     models = sorted(p["model"].unique())
     out = {"variable": variable, "probs": list(probs), "thresholds": list(thresholds), "calm": CALM, "level": level,
@@ -113,7 +113,7 @@ def compare(pairs: pd.DataFrame, variable: str = "ws10", regions: list[str] | No
                 H = np.stack([_hist(gm.loc[gm["init"] == r, "fcst"].to_numpy(float)) for r in runs])
                 st, b = _stats(H.sum(0), probs, thresholds), _stats(H[draws].sum(1), probs, thresholds)
                 ci = {}
-                for key in ("q", "k", "c"):
+                for key in ("q", "k", "c", "calm"):
                     d = b[key] - obs_b[key]
                     ci[f"{key}_lo"], ci[f"{key}_hi"] = np.quantile(d, a, axis=0), np.quantile(d, 1 - a, axis=0)
                 # forecast/observed exceedance; no ratio in a resample that observed none
