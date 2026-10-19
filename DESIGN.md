@@ -222,7 +222,9 @@ so scores can be stratified by any of them.
   pressure as it is, with no reduction (sea-level pressure is a reduction below ground that every
   model and station makes its own way); it falls about 0.12 hPa per metre near sea level, so its
   pairs need |dz_m| <= 5 m (`MAX_DZ_PRESSURE`, at most 0.6 hPa, within the observation error),
-  and a pair with unknown terrain is dropped.
+  and a pair with unknown terrain is dropped. Mean sea-level pressure is scored only where the
+  model terrain at the station is at most 500 m (`MAX_TERRAIN_MSL`): the reduction to sea level
+  runs through the ground under the station, and its differences grow with the height reduced.
 * **Resolution** (`coarsen.py`, `--grid DEG`). Interpolated from its own grid, a finer model
   carries small-scale detail whose position errors count twice (the double penalty), and a model
   published on a grid finer than its own resolution looks sharper than it is. With a common grid,
