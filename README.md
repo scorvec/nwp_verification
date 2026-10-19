@@ -21,7 +21,7 @@ Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification).
 
 | truth | variables | scores |
 |---|---|---|
-| surface stations (GHCNh) | 2 m temperature and dew point, surface (station-level) pressure, sea-level pressure, 10 m wind (u, v, speed, vector), 24 h precipitation at gauges | bias, MAE, RMSE, error SD, correlation |
+| surface stations (GHCNh) | 2 m temperature and dew point, surface (station-level) pressure, sea-level pressure, 10 m wind (u, v, speed, vector), 24 h precipitation at gauges | bias, MAE, RMSE, error SD, correlation; for wind speed the distribution too: QQ quantiles, a hybrid Weibull fit and exceedance frequencies, against the observed (`distribution.py`) |
 | radiosondes | height, temperature and wind at 1000-100 hPa, specific humidity at 1000-300 hPa | same, plus vector wind RMSE |
 | ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill |
 | precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE; per-cell maps of bias and RMSE, the bias tested cell by cell (`precip/maps.py`) |
