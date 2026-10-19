@@ -255,6 +255,16 @@ so scores can be stratified by any of them.
   `ssr_oe` = spread_oe / RMSE of the mean, which is 1 for a calibrated ensemble (a test draws one
   and checks this).
 
+### Distributions (`distribution.py`)
+
+RMSE and bias reward a forecast that hedges towards the middle, so a skewed variable such as wind
+speed is also compared as a distribution, on the common sample, by region and lead group (days 1-2,
+3-5, 6-10): forecast and observed quantiles at 1-99.5 % (a QQ plot); the hybrid Weibull of Takle and
+Brown (1978), the calm fraction (below 0.5 m/s, METAR's whole knots) and a maximum-likelihood
+Weibull shape k and scale c for the rest; and how often 5, 10 and 15 m/s are exceeded. Each run's
+values are binned at 0.05 m/s; a bootstrap over whole runs, model and observations paired, gives
+95 % intervals for every model-minus-observed quantile, k and c, and for the exceedance ratio.
+
 ### Lead times and scale
 
 Deterministic runs to day 10 and ensembles to day 15 run through the same code. Measured here:
