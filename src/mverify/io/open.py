@@ -454,8 +454,8 @@ def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, static: dict)
             if not stacked:
                 init, lead = _field_time(sub, mode, idim, ldim, init_c, lead_c)
                 if init is not None:
-                    fields.append(Field(vname, init, lead, None, grid, sub.transpose(ydim, xdim), unit,
-                                        source=f"{path.name}:{fmt}", accum=_accum(vname, sub, lead)))
+                    fields.append(Field(vname, init, lead, _scalar_member(sub, mdim), grid, sub.transpose(ydim, xdim),
+                                        unit, source=f"{path.name}:{fmt}", accum=_accum(vname, sub, lead)))
                 continue
             init, lead = _field_time(sub.isel({mdim: 0}), mode, idim, ldim, init_c, lead_c)
             if init is None:
@@ -467,6 +467,17 @@ def _iter_dataset(ds: xr.Dataset, path: Path, init_hint, fmt: str, static: dict)
                                     m.transpose(ydim, xdim), unit, source=f"{path.name}:{fmt}", _stack=(stack, k),
                                     accum=_accum(vname, m, lead)))
     return fields
+
+
+def _scalar_member(da: xr.DataArray, mdim: str | None) -> int | None:
+    """The member of a field whose member coordinate is a scalar: cfgrib opens an ensemble's control ("cf") apart
+    from its perturbed members ("pf"), so the control's ``number`` is no dimension. A deterministic GRIB field carries
+    ``number`` 0 too, and stays memberless (None)."""
+    if mdim is None or mdim not in da.coords or da[mdim].ndim:
+        return None
+    if "GRIB_dataType" in da.attrs and da.attrs["GRIB_dataType"] not in ("cf", "pf"):
+        return None
+    return int(da[mdim].values)
 
 
 def _accum(vname: str, da: xr.DataArray, lead: pd.Timedelta) -> tuple[pd.Timedelta, pd.Timedelta] | None:

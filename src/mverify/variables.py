@@ -70,6 +70,11 @@ SURFACE = [
         standard_names=("dew_point_temperature",),
         aliases=("d2m", "2d", "td2m", "TD2", "DPT_2maboveground", "dewpoint_temperature_2m"),
         lo=-90, hi=40, sigma_o=1.6),
+    # Some models publish 2 m relative humidity instead of the dew point (GEFS, GEPS); the dew point is derived from it
+    # and the 2 m temperature (DERIVED). Never observed itself.
+    Var("rh2m", "2 m relative humidity", "%", "surface", grib=("2r", "r2"), grib_level="heightAboveGround",
+        standard_names=("relative_humidity",), aliases=("r2", "2r", "rh2m", "RH2", "RH_2maboveground", "hurs"),
+        lo=0, hi=105),
     Var("msl", "mean sea-level pressure", "hPa", "surface", grib=("prmsl", "msl", "mslet"),
         grib_level="meanSea", standard_names=("air_pressure_at_mean_sea_level", "air_pressure_at_sea_level"),
         aliases=("msl", "prmsl", "PRMSL_meansealevel", "MSLP", "psl", "slp", "mslp"), lo=870, hi=1090,
@@ -137,8 +142,15 @@ UPPER = [
 
 CATALOG: dict[str, Var] = {v.name: v for v in [*SURFACE, *UPPER, PRECIP, GAUGE]}
 
+def dew_point(t, rh):
+    """Dew point (degC) from temperature (degC) and relative humidity (%), over water (Bolton 1980), the inverse of
+    the vapour pressure in ``specific_humidity``."""
+    g = np.log(np.clip(rh, 0.1, 100.0) / 100.0) + 17.67 * t / (t + 243.5)
+    return 243.5 * g / (17.67 - g)
+
+
 # Quantities a model may only provide through components: name -> (components, function).
-DERIVED = {"ws10": (("u10", "v10"), lambda u, v: (u**2 + v**2) ** 0.5)}
+DERIVED = {"ws10": (("u10", "v10"), lambda u, v: (u**2 + v**2) ** 0.5), "td2m": (("t2m", "rh2m"), dew_point)}
 
 # Base names of pressure-level fields as they appear in netCDF / zarr files.
 UPPER_ALIASES = {
