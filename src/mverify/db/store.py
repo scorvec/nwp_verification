@@ -431,10 +431,12 @@ class ObsStore:
 
     def fetch_obs(self, variables: Sequence[str], start, end,
                   bbox: tuple[float, float, float, float] | None = None,
-                  networks: Sequence[str] | None = None, clean_only: bool = True) -> pd.DataFrame:
+                  networks: Sequence[str] | None = None, clean_only: bool = True,
+                  times: Sequence | None = None) -> pd.DataFrame:
         """Observations with station metadata for ``variables`` valid in [start, end].
 
         ``bbox`` selects by station position; the returned lat/lon are the observation's own.
+        ``times`` keeps only those valid times (a forecast's steps, say, of hourly reports).
 
         ``bbox`` is (lon_min, lat_min, lon_max, lat_max) in degrees, lon in -180..180;
         a box with lon_min > lon_max crosses the dateline.
@@ -443,6 +445,9 @@ class ObsStore:
         args: list = [list(variables), pd.Timestamp(start).to_pydatetime(), pd.Timestamp(end).to_pydatetime()]
         if clean_only:
             where.append("o.qc = 0")
+        if times is not None:
+            where.append("o.valid_time IN (SELECT unnest(?::TIMESTAMP[]))")
+            args.append([pd.Timestamp(t).to_pydatetime() for t in times])
         if networks:
             where.append("s.network IN (SELECT unnest(?::VARCHAR[]))")
             args.append(list(networks))

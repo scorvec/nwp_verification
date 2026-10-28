@@ -108,8 +108,9 @@ def match(fc: Forecast, store: ObsStore, variables: list[str] | None = None,
         wanted = [v for v in wanted if v in variables]
     if not wanted or not fc.fields:
         return pd.DataFrame(columns=PAIR_COLUMNS)
-    valid = [f.valid for f in fc.fields]
-    obs = store.fetch_obs(wanted, min(valid), max(valid), bbox or _grid_bbox(fc), networks)
+    valid = sorted({f.valid for f in fc.fields})
+    # only the fields' valid times: a gauge total ends at one too, since accumulations are taken between steps
+    obs = store.fetch_obs(wanted, valid[0], valid[-1], bbox or _grid_bbox(fc), networks, times=valid)
     if obs.empty:
         return pd.DataFrame(columns=PAIR_COLUMNS)
 
