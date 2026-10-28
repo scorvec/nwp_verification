@@ -4,7 +4,7 @@ Verify weather model output against real observations, without downloading or cl
 observations yourself.
 
 ```
-pip install "mverify[all]"
+pip install "mverify[all] @ git+https://github.com/scorvec/nwp_verification"
 mverify score GFS="gfs/*.grib2" AIFS=aifs.zarr --region conus --out scores.json
 ```
 
