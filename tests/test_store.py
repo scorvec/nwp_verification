@@ -127,6 +127,9 @@ def test_fetch_obs_filters(store, stations):
     assert sorted(got["station_id"]) == ["GHCNH:A", "GHCNH:C"]
     got = store.fetch_obs(["t2m", "z500"], "2026-10-13", "2026-10-13", networks=["RAOB"])
     assert got["station_id"].tolist() == ["RAOB:72520"]
+    got = store.fetch_obs(["t2m"], "2026-10-13", "2026-10-13 01:00", times=["2026-10-13 00:00"])
+    assert sorted(got["station_id"]) == ["GHCNH:A", "GHCNH:B"]
+    assert store.fetch_obs(["t2m"], "2026-10-13", "2026-10-13 01:00", times=["2026-10-13 01:00"]).empty
 
 
 def test_fetch_obs_bbox_across_the_dateline(store):

@@ -150,8 +150,14 @@ def select(sl: pd.DataFrame, n: int, cell_deg: float = 2.0) -> pd.DataFrame:
 
 
 def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None = None,
-           max_stations: int | None = None, cache_dir: Path | None = None, workers: int = 8, progress=print) -> int:
-    """Fetch, clean and write GHCNh station-years; unchanged upstream files are skipped. Returns rows written."""
+           max_stations: int | None = None, cache_dir: Path | None = None, workers: int = 8, progress=print,
+           since=None, until=None) -> int:
+    """Fetch, clean and write GHCNh station-years; unchanged upstream files are skipped. Returns rows written.
+
+    ``since`` / ``until`` keep only the observations in that window. Each station-year is still read and
+    quality-controlled whole, so the spike and stuck-sensor checks see the hours either side of it, but
+    only the window is stored: every station for a few weeks takes a small part of the disk of a year.
+    """
     cache_dir = cache_dir or db_path().parent / "cache"
     sl = station_list(cache_dir)
     if ids:
@@ -162,11 +168,19 @@ def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None =
     if max_stations:
         sl = select(sl, max_stations)
     meta = sl.set_index("GHCN_ID")
+    lo = pd.Timestamp.min if since is None else pd.Timestamp(since)
+    hi = pd.Timestamp.max if until is None else pd.Timestamp(until)
+    # a file read for one window is not ingested for another: the window is part of the version logged
+    tag = "" if since is None and until is None else f"@{since}..{until}"
     total = 0
     for year in years:
+        start, end = max(pd.Timestamp(year, 1, 1), lo), min(pd.Timestamp(year, 12, 31, 23), hi)
+        if start > end:
+            continue
         ids_ = list(meta.index)
         with ThreadPoolExecutor(workers) as ex:
-            versions = dict(zip(ids_, ex.map(lambda g, y=year: http.etag(station_url(g, y)), ids_)))
+            etags = ex.map(lambda g, y=year: http.etag(station_url(g, y)), ids_)
+            versions = {g: v and v + tag for g, v in zip(ids_, etags)}
         todo = [g for g in ids_ if versions[g] and store.ingested_version(SOURCE, f"{g}/{year}") != versions[g]]
         progress(f"ghcnh {year}: {len(todo)} of {len(ids_)} station files new or changed")
         with ThreadPoolExecutor(workers) as ex:
@@ -177,20 +191,22 @@ def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None =
                 raws = list(pending)
                 if k + 1 < len(chunks):
                     pending = ex.map(lambda g, y=year: _fetch(g, y), chunks[k + 1])
-                total += _write_chunk(store, chunk, raws, meta, year, versions, progress)
+                total += _write_chunk(store, chunk, raws, meta, (start, end), versions, progress)
     return total
 
 
-def _write_chunk(store: ObsStore, ids: list[str], raws: list[pd.DataFrame], meta: pd.DataFrame, year: int,
-                 versions: dict[str, str], progress) -> int:
+def _write_chunk(store: ObsStore, ids: list[str], raws: list[pd.DataFrame], meta: pd.DataFrame,
+                 span: tuple[pd.Timestamp, pd.Timestamp], versions: dict[str, str], progress) -> int:
+    """Station-years read whole, written for the hours of ``span`` (inside one year)."""
+    start, end = span
     total = 0
     for gid, raw in zip(ids, raws):
         rows = qc.run_surface(parse(raw, f"GHCNH:{gid}"))
         station = pd.DataFrame([_station_row(gid, meta.loc[gid], raw)])
         try:
-            window = ([f"GHCNH:{gid}"], pd.Timestamp(year, 1, 1), pd.Timestamp(year, 12, 31, 23))
-            total += store.ingest_batch(SOURCE, [(f"{gid}/{year}", versions[gid], len(raw))], station,
-                                        rows[rows["valid_time"].dt.year == year], window)
+            window = ([f"GHCNH:{gid}"], start, end)
+            total += store.ingest_batch(SOURCE, [(f"{gid}/{start.year}", versions[gid], len(raw))], station,
+                                        rows[rows["valid_time"].between(start, end)], window)
         except ValidationError as e:  # not logged, so the next update retries it
-            progress(f"ghcnh {gid}/{year}: rejected, {e}")
+            progress(f"ghcnh {gid}/{start.year}: rejected, {e}")
     return total
