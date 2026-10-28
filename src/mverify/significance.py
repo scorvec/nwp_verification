@@ -79,6 +79,22 @@ def fdr(p: np.ndarray, q: float = 0.10) -> np.ndarray:
     return out
 
 
+def _paired(errors: pd.DataFrame, col: str) -> pd.DataFrame:
+    """The paired test of every ordered pair of models on the per-run mean of ``col``."""
+    cols = [*BY, "model", "reference", "runs", "runs_eff", "p"]
+    if errors.empty or errors["model"].nunique() < 2:
+        return pd.DataFrame(columns=cols)
+    per_run = (errors.groupby(["model", *BY, "init"], dropna=False)[col].mean()
+               .unstack("model").sort_index(level="init"))
+    rows = []
+    for a, b in permutations(per_run.columns, 2):
+        d = (per_run[a] - per_run[b]).dropna()
+        for key, g in d.groupby(level=BY, sort=True):
+            d_run = g.to_numpy()
+            rows.append((*key, a, b, len(g), effective_runs(d_run), paired_test(d_run)))
+    return pd.DataFrame(rows, columns=cols)
+
+
 def tests(pairs: pd.DataFrame) -> pd.DataFrame:
     """p values for every ordered pair of models: columns ``BY`` + ``model``, ``reference``, ``runs`` (paired
     runs), ``runs_eff`` (the effective runs the test counts, ``effective_runs``) and ``p``.
@@ -86,15 +102,11 @@ def tests(pairs: pd.DataFrame) -> pd.DataFrame:
     ``pairs`` carries a ``region`` column (``scores.assign_regions``) and should be the
     common sample, so that both models of a pair are judged on the same observations.
     """
-    cols = [*BY, "model", "reference", "runs", "runs_eff", "p"]
-    if pairs.empty or pairs["model"].nunique() < 2:
-        return pd.DataFrame(columns=cols)
-    mse = (squared_errors(pairs).groupby(["model", *BY, "init"], dropna=False)["se"].mean()
-           .unstack("model").sort_index(level="init"))
-    rows = []
-    for a, b in permutations(mse.columns, 2):
-        d = (mse[a] - mse[b]).dropna()
-        for key, g in d.groupby(level=BY, sort=True):
-            d_run = g.to_numpy()
-            rows.append((*key, a, b, len(g), effective_runs(d_run), paired_test(d_run)))
-    return pd.DataFrame(rows, columns=cols)
+    return _paired(squared_errors(pairs), "se")
+
+
+def ensemble_tests(cases: pd.DataFrame, stat: str = "crps") -> pd.DataFrame:
+    """As ``tests``, for ensembles: every ordered pair of models on the per-run mean ``stat`` (``crps`` or
+    ``crps_oe``) of their cases (``mverify.ensemble.summarise``), which carry ``region`` and should be the common
+    sample of the ensembles compared."""
+    return _paired(cases, stat)

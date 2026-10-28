@@ -101,6 +101,7 @@ def test_grib_round_trip(tmp_path, init):
     assert fc["t2m"].values().mean() == pytest.approx(16.85)
     assert fc["msl"].values().mean() == pytest.approx(1013.0)
     assert fc["t2m"].lead_h == 6 and fc["t2m"].init == init
+    assert fc["t2m"].member is None  # a deterministic message's number 0 is no member
 
 
 def test_unrecognised_bytes_are_refused(tmp_path):
