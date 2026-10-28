@@ -221,3 +221,18 @@ def test_ghcnh_24_hour_precipitation_is_the_gauge_total():
     raw = ghcnh_frame([{"DATE": "2026-10-13T12:00:00", "precipitation_24_hour": 12.7}])
     out = ghcnh.parse(raw, "GHCNH:X").set_index("variable")["value"]
     assert out["pr24"] == 12.7
+
+
+def test_ghcnh_window_stores_only_its_hours_of_each_station_year(monkeypatch, store, tmp_path):
+    sl = pd.DataFrame({"GHCN_ID": ["X1"], "NAME": ["x"], "LATITUDE": [40.0], "LONGITUDE": [-100.0],
+                       "ELEVATION": [500.0], "WMO_ID": [None], "ICAO": [None], "ISO_CODE": ["US"]})
+    raw = ghcnh_frame([{"DATE": f"2026-10-{d:02d}T12:00:00", "temperature": 10.0 + d} for d in (1, 5, 9)])
+    monkeypatch.setattr(ghcnh, "station_list", lambda cache_dir: sl)
+    monkeypatch.setattr(ghcnh.http, "etag", lambda url: "e1")
+    monkeypatch.setattr(ghcnh, "_fetch", lambda g, y: raw)
+    ghcnh.ingest(store, [2026], since="2026-10-04", until="2026-10-06", cache_dir=tmp_path,
+                 progress=lambda m: None)
+    obs = store.fetch_obs(["t2m"], pd.Timestamp("2026-10-01"), pd.Timestamp("2026-10-31"))
+    assert obs["valid_time"].tolist() == [pd.Timestamp("2026-10-05 12:00")]
+    # the version logged names the window, so another window reads the file again
+    assert store.ingested_version("ghcnh", "X1/2026") == "e1@2026-10-04..2026-10-06"
