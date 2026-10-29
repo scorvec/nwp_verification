@@ -1,14 +1,29 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mverify"
-version = "0.1.0.dev0"
+dynamic = ["version"]                 # single source: src/mverify/__init__.py __version__
 description = "Verify weather model output of any format against a ready-made database of cleaned observations"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "Shawn Corvec" }]
+keywords = ["meteorology", "numerical weather prediction", "forecast verification", "GRIB", "radiosondes",
+            "surface observations", "ensembles", "CRPS", "precipitation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
@@ -20,6 +35,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/scorvec/nwp_verification"
+Design = "https://github.com/scorvec/nwp_verification/blob/main/DESIGN.md"
+Issues = "https://github.com/scorvec/nwp_verification/issues"
+"Live scores" = "https://scorvec.com/verification.html"
 
 [project.optional-dependencies]
 grib = ["cfgrib>=0.9.10", "eccodes>=1.6"]
@@ -33,6 +51,9 @@ mverify = "mverify.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mverify.__version__" }
 
 [tool.setuptools.package-data]
 mverify = ["db/*.sql"]
