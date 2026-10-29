@@ -1,10 +1,14 @@
 # mverify
 
+[![ci](https://github.com/scorvec/nwp_verification/actions/workflows/ci.yml/badge.svg)](https://github.com/scorvec/nwp_verification/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mverify)](https://pypi.org/project/mverify/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/scorvec/nwp_verification/blob/main/LICENSE)
+
 Verify weather model output against real observations, without downloading or cleaning any
 observations yourself.
 
 ```
-pip install "mverify[all] @ git+https://github.com/scorvec/nwp_verification"
+pip install "mverify[all]"
 mverify score GFS="gfs/*.grib2" AIFS=aifs.zarr --region conus --out scores.json
 ```
 
@@ -15,7 +19,7 @@ stations (GHCNh) and radiosondes that is built and kept current centrally.
 
 Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification). The Python package and command are named `mverify`.
 
-**Status: prototype.** See [DESIGN.md](DESIGN.md) for the architecture and the plan.
+**Status: prototype.** See [DESIGN.md](https://github.com/scorvec/nwp_verification/blob/main/DESIGN.md) for the architecture and the plan.
 
 ## What it scores today
 
@@ -32,7 +36,7 @@ are left out, coastal stations are matched to land grid points when the files ha
 winds from anemometers that are not at 10 m are corrected to 10 m. Several models are compared on
 the observations they all have, and the scorecard says which differences are significant; with `--grid DEG`
 every model is first averaged onto one regular grid, so models of different resolution are compared from
-cells of the same size. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
+cells of the same size. See [DESIGN.md](https://github.com/scorvec/nwp_verification/blob/main/DESIGN.md#making-observations-and-the-model-comparable).
 
 ## Commands
 
