@@ -306,7 +306,7 @@ def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None =
     quality-controlled whole, so the spike and stuck-sensor checks see the hours either side of it, but
     only the window is stored: every station for a few weeks takes a small part of the disk of a year.
 
-    ``failed_totals`` (a directory) takes ``gauge_failed_<year>.parquet``: the 24 h gauge totals that the
+    ``failed_totals`` (a directory) takes ``failed_totals_<year>.parquet``: the 24 h gauge totals that the
     checks failed in the station-years read, over the whole year whatever the window (station_id,
     valid_time, qc). Pairs kept from an earlier window may hold totals that a later failure of their
     station makes suspect; the file names them.
@@ -353,7 +353,7 @@ def _failed_writer(root: Path | None, year: int):
     if root is None:
         return contextlib.nullcontext()
     Path(root).mkdir(parents=True, exist_ok=True)
-    return pq.ParquetWriter(Path(root) / f"gauge_failed_{year}.parquet", FAILED, compression="zstd")
+    return pq.ParquetWriter(Path(root) / f"failed_totals_{year}.parquet", FAILED, compression="zstd")
 
 
 def _write_chunk(store: ObsStore, ids: list[str], raws: list[pd.DataFrame], meta: pd.DataFrame,

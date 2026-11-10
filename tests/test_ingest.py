@@ -359,7 +359,7 @@ def test_ghcnh_the_failed_totals_of_the_whole_year_are_listed(monkeypatch, store
     monkeypatch.setattr(ghcnh.http, "etag", lambda url: "e1")
     ghcnh.ingest(store, [2026], since="2026-10-04", until="2026-10-06", cache_dir=tmp_path,
                  progress=lambda m: None, failed_totals=tmp_path / "failed")
-    failed = pd.read_parquet(tmp_path / "failed" / "gauge_failed_2026.parquet")
+    failed = pd.read_parquet(tmp_path / "failed" / "failed_totals_2026.parquet")
     # the total above the range fell before the window: it and the station's sound total are both listed
     assert failed["station_id"].tolist() == ["GHCNH:X1"] * 2
     assert dict(zip(failed["valid_time"], failed["qc"])) == {

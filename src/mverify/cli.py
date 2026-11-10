@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--until", help="only observations at or before this time")
     g.add_argument("--failed-totals", type=Path, metavar="DIR",
                    help="write the 24 h gauge totals the checks failed, of the whole of each station-year "
-                        "read, to DIR/gauge_failed_<year>.parquet")
+                        "read, to DIR/failed_totals_<year>.parquet")
     g.add_argument("--workers", type=int, default=8)
     r = dsub.add_parser("soundings", help="ingest radiosonde mandatory levels from the scorvec.com mirror")
     r.add_argument("--root", default=None, help="mirror URL or local checkout of the skewt-data branch")
