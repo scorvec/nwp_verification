@@ -107,7 +107,7 @@ Decisions and why:
 | 2 `range` | physical limits from `variables` | all |
 | 4 `spike` | departs from both hourly neighbours in the same direction beyond a per-variable limit | surface |
 | 8 `stuck` | identical value for longer than plausible | surface |
-| 16 `inconsistent` | dew point above temperature | surface |
+| 16 `inconsistent` | dew point above temperature; a reported 24 h gauge total unlike the sum of the same hours' amounts | surface |
 | 32 `vertical` | layer thickness disagrees with the hypsometric thickness; isolates the bad level | radiosonde |
 
 Station positions are part of QC: radiosonde stations are checked against an independent list
@@ -325,10 +325,24 @@ same cells.
   least 8 days; the p values of all cells of a map go through Benjamini-Hochberg at a false-discovery
   rate of 10 % (`significance.fdr`), so a map shades only the cells whose bias is unlikely to be
   noise.
-* **Gauges** (`pr24`). The 24 h totals stations report (GHCNh `precipitation_24_hour`; US ASOS
-  at 12Z, the window Stage IV uses) are matched like any station variable, with each run's total
-  over the same 24 h built from its accumulations, so they get the same sample rules, scores and
-  paired tests. They check the gridded scores at points; in the US they are not independent of
+* **Gauges** (`pr24`). The 24 h totals stations report (GHCNh `precipitation_24_hour`) and, where
+  a station gives hourly amounts, totals built from them (`ghcnh.gauge_totals`, ending at 00, 06,
+  12 and 18 UTC) are matched like any station variable, with each run's total over the same 24 h
+  built from its accumulations, so they get the same sample rules, scores and paired tests.
+  Building matters most in the US, where a station reports a 24 h total only at 12Z after a wet
+  day and never reports a dry one. The hourly amounts come from two kinds of report: the routine
+  METAR of a station with a gauge (the amount since the last routine report; specials repeat a
+  running total and are left out) and hourly feeds that give every hour's amount, zero included
+  (Environment Canada). A routine METAR leaves the amount out after a dry hour, so an hour without
+  one counts as dry only if the station reported an amount in the 30 days before, the report came
+  with its remarks, they do not say the gauge is out (`PNO`), and no rain or snow is falling in
+  it; otherwise the hour is unknown, and a total needs all 24 hours. Where both a reported and a
+  built total exist the reported one is stored, flagged `inconsistent` if they differ by more than
+  the larger of 1 mm and 10 %; in a sample of 69 US and Canadian station-years 1,187 pairs agreed
+  and none differed. Limits: a station-year file starts on 1 January, so the year's first days
+  have no totals until the station's first amount proves the gauge; a gauge that misses snow and
+  has no weather sensor to say so reads dry.
+  Gauges check the gridded scores at points; in the US they are not independent of
   Stage IV, whose analyses take in ASOS gauges, while elsewhere they are the only daily truth.
 * **Latency, and why there are two global products.** Stage IV is final within about a day.
   GPCP V3.3 daily currently ends at 2025-12-31, so it scores the archive; IMERG Late scores the

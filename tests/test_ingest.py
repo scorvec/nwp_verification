@@ -223,6 +223,98 @@ def test_ghcnh_24_hour_precipitation_is_the_gauge_total():
     assert out["pr24"] == 12.7
 
 
+def metars(start, hours, wet=(), remarks="RMK AO2", minute=51):
+    """Routine METARs each hour from ``start``; ``wet`` maps an hour's position to its amount in mm."""
+    wet = dict(wet)
+    rows = []
+    for k, t in enumerate(pd.date_range(start, periods=hours, freq="h") + pd.Timedelta(minutes=minute)):
+        group = f" P{round(wet[k] / 0.254):04d}" if k in wet else ""
+        row = {"DATE": t.isoformat(), "temperature": 10.0, "temperature_Report_Type": "FM15",
+               "REM": f"KXXX {t:%d%H%M}Z 27005KT 10SM FEW035 10/05 A3000 {remarks}{group}".strip()}
+        if k in wet:
+            row |= {"precipitation": wet[k], "precipitation_Report_Type": "FM15"}
+        rows.append(row)
+    return rows
+
+
+def totals(rows):
+    out = ghcnh.parse(ghcnh_frame(rows), "GHCNH:X")
+    return out[out["variable"] == "pr24"].set_index("valid_time")
+
+
+def test_ghcnh_builds_24_hour_totals_from_the_routine_reports_of_a_station_that_measures():
+    # 30 hourly reports from 06:51: the first closes the hour to 07Z, so a full day ends at 06Z and at 12Z
+    rows = metars("2026-10-12T06:00", 30, wet={0: 2.5, 6: 5.1, 26: 1.3})
+    # a special between two routine reports repeats a running total: not part of the sum
+    rows.append({"DATE": "2026-10-12T12:58:00", "temperature": 10.0, "temperature_Report_Type": "FM16",
+                 "precipitation": 4.0, "precipitation_Report_Type": "FM16",
+                 "REM": "KXXX 121258Z RMK AO2 P0016"})
+    out = totals(rows)
+    assert out.index.tolist() == [pd.Timestamp("2026-10-13 06:00"), pd.Timestamp("2026-10-13 12:00")]
+    assert out["value"].tolist() == [7.6, 6.4]  # 2.5 + 5.1, then 5.1 + 1.3 once the first hour has left
+    assert set(out["source"]) == {"ghcnh:hourly"} and set(out["dt_min"]) == {-9} and not out["qc"].any()
+
+
+def test_ghcnh_an_hour_without_an_amount_is_dry_only_where_the_gauge_is_known_to_work():
+    day = pd.Timestamp("2026-10-13 12:00")
+    assert day in totals(metars("2026-10-12T06:00", 30, wet={0: 0.0})).index  # a trace proves the gauge
+    assert totals(metars("2026-10-12T06:00", 30)).empty  # a station that never reports an amount
+    assert totals(metars("2026-10-12T06:00", 30, wet={0: 2.5}, remarks="")).empty  # copies without remarks
+    for spoiled in ("KXXX 130251Z 27005KT 10SM FEW035 10/05 A3000 RMK AO2 PNO",  # gauge out
+                    "KXXX 130251Z 27005KT 3SM -RA OVC010 10/09 A3000 RMK AO2"):  # raining, no amount
+        rows = metars("2026-10-12T06:00", 30, wet={0: 2.5})
+        rows[20]["REM"] = spoiled
+        assert day not in totals(rows).index
+    rows = metars("2026-10-12T06:00", 30, wet={0: 2.5})
+    del rows[20]  # an hour with no routine report
+    assert day not in totals(rows).index
+    # proof runs out: after 30 dry days without an amount the hours are unknown again
+    long_dry = totals(metars("2026-09-01T00:00", 24 * 40, wet={0: 2.5}))
+    assert long_dry.index.max() == pd.Timestamp("2026-10-01 00:00")
+
+
+def test_ghcnh_hourly_feed_totals_need_every_hour():
+    feed = [{"DATE": t.isoformat(), "precipitation": 0.5 if k == 2 else 0.0,
+             "precipitation_Report_Type": "EnvCan"}
+            for k, t in enumerate(pd.date_range("2026-10-12T01:00", periods=36, freq="h"))]
+    ends = pd.to_datetime(["2026-10-13 00:00", "2026-10-13 06:00", "2026-10-13 12:00"])
+    assert totals(feed)["value"].to_dict() == dict(zip(ends, [0.5, 0.0, 0.0]))
+    # without 11Z only the day that starts at 13Z is whole
+    assert totals(feed[:10] + feed[11:]).index.tolist() == [ends[2]]
+
+
+def test_ghcnh_reported_total_stands_and_is_flagged_where_the_built_total_disagrees():
+    def reported(value, code=np.nan):
+        return {"DATE": "2026-10-13T12:00:00", "precipitation_24_hour": value,
+                "precipitation_24_hour_Quality_Code": code, "precipitation_24_hour_Report_Type": "FM12"}
+
+    hours = metars("2026-10-12T06:00", 30, wet={0: 0.3, 10: 12.7})
+    day = pd.Timestamp("2026-10-13 12:00")
+    agree = totals([*hours, reported(13.0)]).loc[day]
+    assert (agree["value"], agree["qc"], agree["source"]) == (13.0, 0, "ghcnh:FM12")
+    differ = totals([*hours, reported(2.0)]).loc[day]
+    assert (differ["value"], differ["qc"]) == (2.0, qc.INCONSISTENT)
+    # a total the provider flagged gives way to the built one
+    replaced = totals([*hours, reported(2.0, "s")]).loc[day]
+    assert (replaced["value"], replaced["qc"], replaced["source"]) == (12.7, 0, "ghcnh:hourly")
+
+
+def test_ghcnh_built_totals_reach_the_store_for_the_window(monkeypatch, store, tmp_path):
+    sl = pd.DataFrame({"GHCN_ID": ["X1"], "NAME": ["x"], "LATITUDE": [40.0], "LONGITUDE": [-100.0],
+                       "ELEVATION": [500.0], "WMO_ID": [None], "ICAO": ["KXXX"], "ISO_CODE": ["US"]})
+    raw = ghcnh_frame(metars("2026-10-01T00:00", 24 * 8, wet={0: 2.5, 100: 5.1}))
+    monkeypatch.setattr(ghcnh, "station_list", lambda cache_dir: sl)
+    monkeypatch.setattr(ghcnh.http, "etag", lambda url: "e1")
+    monkeypatch.setattr(ghcnh, "_fetch", lambda g, y: raw)
+    ghcnh.ingest(store, [2026], since="2026-10-05", until="2026-10-06", cache_dir=tmp_path,
+                 progress=lambda m: None)
+    obs = store.fetch_obs(["pr24"], pd.Timestamp("2026-10-01"), pd.Timestamp("2026-10-31"))
+    # the amount fell in the hour to 05Z on the 5th: the proof from the 1st, outside the window, still counts
+    assert dict(zip(obs["valid_time"], obs["value"])) == dict(zip(
+        pd.to_datetime(["2026-10-05 00:00", "2026-10-05 06:00", "2026-10-05 12:00", "2026-10-05 18:00",
+                        "2026-10-06 00:00"]), [0.0, 5.1, 5.1, 5.1, 5.1]))
+
+
 def test_ghcnh_window_stores_only_its_hours_of_each_station_year(monkeypatch, store, tmp_path):
     sl = pd.DataFrame({"GHCN_ID": ["X1"], "NAME": ["x"], "LATITUDE": [40.0], "LONGITUDE": [-100.0],
                        "ELEVATION": [500.0], "WMO_ID": [None], "ICAO": [None], "ISO_CODE": ["US"]})

@@ -12,6 +12,9 @@ Cleaning applied here:
     closest to the hour within +-30 min wins, ties broken by report type
     (routine METAR FM-15 > SYNOP FM-12 > SPECI FM-16 > other)
   * wind is stored as u10/v10 (calm = 0, 0) and as ws10
+  * gauge totals (``pr24``): the 24 h totals stations report, joined by totals built from hourly amounts
+    where a station gives them (``gauge_totals``); a reported total that disagrees with the built one for
+    the same hours is flagged ``qc.INCONSISTENT``
   * mverify.db.qc surface checks (range, spike, stuck sensor, dew point > temperature)
 """
 
@@ -42,6 +45,18 @@ FIELDS = {  # GHCNh column -> canonical variable
 }
 REPORT_PRIORITY = {"FM15": 0, "FM-15": 0, "FM12": 1, "FM-12": 1, "FM16": 2, "FM-16": 2}
 BAD_LEGACY = {"2", "3", "6", "7"}
+ROWS = ["station_id", "valid_time", "variable", "value", "qc", "dt_min", "source"]
+
+TOTAL = FIELDS["precipitation_24_hour"]
+METAR = ("FM15", "FM-15")  # routine aviation reports: at a station with a gauge they carry the hour's amount
+HOURLY_FEED = ("EnvCan",)  # feeds that give every hour's amount, zero included
+GAUGE_HOURS = (0, 6, 12, 18)  # UTC ends of the totals built from hourly amounts
+PROOF_DAYS = 30  # an hour without an amount is dry only if the station reported one this recently
+AGREE_MM, AGREE_FRAC = 1.0, 0.10  # reported and built totals agree within the larger of the two
+REMARKS = r"\sRMK\s"  # the part of a METAR that holds the hour's amount; some copies come without it
+GAUGE_OUT = r"\bPNO\b"  # METAR remark: precipitation amount not available
+# rain, drizzle, snow or ice falling at the station in the body of a METAR (not in the vicinity, not blowing)
+FALLING = r"\d{6}Z\s(?:(?!RMK\b)\S+\s)*?[-+]?(?:TS|SH|FZ)*(?:DZ|RA|SN|SG|PL|GR|GS|UP)+(?:\s|$)"
 
 
 def station_url(ghcn_id: str, year: int) -> str:
@@ -95,12 +110,80 @@ def parse(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
         emit("u10", u, code, rtype)
         emit("v10", v, code, rtype)
     if not parts:
-        return pd.DataFrame(columns=["station_id", "valid_time", "variable", "value", "qc", "dt_min", "source"])
+        return gauge_totals(raw, station_id)
     df = pd.concat(parts, ignore_index=True)
     df["_abs"] = df["dt_min"].abs()
     df = (df.sort_values(["variable", "valid_time", "qc", "_abs", "_prio"])
             .drop_duplicates(["variable", "valid_time"], keep="first"))
-    return df.drop(columns=["_abs", "_prio"]).reset_index(drop=True)
+    return _merge_totals(df.drop(columns=["_abs", "_prio"]), gauge_totals(raw, station_id))
+
+
+def gauge_totals(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
+    """24 h totals built from a station's hourly amounts: canonical ``pr24`` rows ending at ``GAUGE_HOURS``.
+
+    Two kinds of report give an hour's amount. A routine METAR at a station with a gauge carries the amount
+    since the previous routine report and leaves the group out after a dry hour, so an hour without one
+    counts as dry only where the station is known to be measuring: it reported an amount (a trace counts)
+    within the ``PROOF_DAYS`` before, the report came with its remarks, they do not say the gauge is out,
+    and it does not have rain or snow falling. The routine report is the one at the station's usual minute;
+    the specials between two routine reports repeat a running total and are not summed. An hourly feed
+    gives every hour's amount. A total needs all 24 of its hours, so a station that reports no hourly
+    amounts gets none, and neither does the first day of a station-year file.
+    """
+    if "precipitation" not in raw or raw.empty:
+        return pd.DataFrame(columns=ROWS)
+    t = pd.to_datetime(raw["DATE"], utc=False)
+    hour = t.dt.round("h")
+    dt_min = ((t - hour).dt.total_seconds() / 60).round().astype(int)
+    near = dt_min.abs() <= 15
+    ptype = raw["precipitation_Report_Type"].astype("string")
+    amount = pd.to_numeric(raw["precipitation"], errors="coerce")
+    bad = pd.Series(_flag_bad(raw["precipitation_Quality_Code"]), raw.index)
+    metar = raw.filter(regex="_Report_Type$").astype("string").isin(METAR).any(axis=1) & near
+    usual = t[metar].dt.minute.mode()
+    routine = metar & (t.dt.minute == (usual.iloc[0] if len(usual) else -1))
+    own = routine & ptype.isin(METAR)
+    remark = raw.get("REM", pd.Series(pd.NA, raw.index)).astype("string")
+    rows = pd.DataFrame({
+        "hour": hour, "dt_min": dt_min, "routine": routine,
+        "own": amount.where(own & ~bad), "feed": amount.where(ptype.isin(HOURLY_FEED) & near & ~bad),
+        "full": routine & remark.str.contains(REMARKS, na=False),
+        "out": routine & ((own & bad) | remark.str.contains(GAUGE_OUT, na=False)),
+        "falling": routine & remark.str.contains(FALLING, na=False),
+    })
+    rows = rows[rows["routine"] | rows["feed"].notna()]
+    if rows.empty:
+        return pd.DataFrame(columns=ROWS)
+    hours = rows.groupby("hour")
+    index = pd.date_range(rows["hour"].min(), rows["hour"].max(), freq="h")
+    own, feed = hours["own"].max().reindex(index), hours["feed"].max().reindex(index)
+    full, out, falling = (hours[c].any().reindex(index, fill_value=False) for c in ("full", "out", "falling"))
+    proven = own.notna().rolling(24 * PROOF_DAYS, min_periods=1).max().astype(bool)
+    dry = full & proven & ~out & ~falling & own.isna()
+    hourly = feed.fillna(own.where(~out).mask(dry, 0.0))
+    total = hourly.rolling(24, min_periods=24).sum().round(1)
+    total = total[total.notna() & total.index.hour.isin(GAUGE_HOURS)]
+    return pd.DataFrame({
+        "station_id": station_id, "valid_time": total.index, "variable": TOTAL,
+        "value": total.to_numpy(float), "qc": np.zeros(len(total), "uint16"),
+        "dt_min": hours["dt_min"].first().reindex(total.index).to_numpy(int), "source": "ghcnh:hourly",
+    })
+
+
+def _merge_totals(df: pd.DataFrame, built: pd.DataFrame) -> pd.DataFrame:
+    """Reported and built 24 h totals as one series. A reported total stands, flagged where the total built
+    for the same hours differs from it by more than ``AGREE_MM`` and ``AGREE_FRAC`` of the larger; one the
+    provider flagged gives way to the built total; an hour without a reported total takes the built one."""
+    if built.empty:
+        return df.reset_index(drop=True)
+    reported = (df["variable"] == TOTAL).to_numpy()
+    value, flags = df["value"].to_numpy(float), df["qc"].to_numpy()
+    other = built.set_index("valid_time")["value"].reindex(df["valid_time"]).to_numpy(float)
+    replaced = reported & (flags != 0) & ~np.isnan(other)
+    differ = reported & (np.abs(value - other) > np.maximum(AGREE_MM, AGREE_FRAC * np.maximum(value, other)))
+    df = df.assign(qc=np.where(differ, flags | qc.INCONSISTENT, flags).astype("uint16"))[~replaced]
+    held = df.loc[df["variable"] == TOTAL, "valid_time"]
+    return pd.concat([df, built[~built["valid_time"].isin(held)]], ignore_index=True)
 
 
 MISSING = -999.9
@@ -124,8 +207,8 @@ def _station_row(ghcn_id: str, meta: pd.Series, raw: pd.DataFrame | None) -> dic
             "country": meta.get("ISO_CODE")}
 
 
-COLUMNS = ["DATE", "LATITUDE", "LONGITUDE", "ELEVATION"] + [
-    f"{c}{suffix}" for c in (*FIELDS, "wind_speed", "wind_direction")
+COLUMNS = ["DATE", "LATITUDE", "LONGITUDE", "ELEVATION", "REM"] + [
+    f"{c}{suffix}" for c in (*FIELDS, "wind_speed", "wind_direction", "precipitation")
     for suffix in ("", "_Quality_Code", "_Report_Type")]
 
 

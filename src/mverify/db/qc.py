@@ -26,7 +26,8 @@ FLAGS = {
     RANGE: ("range", "outside the physical limits of the variable (variables.lo / variables.hi)"),
     SPIKE: ("spike", "isolated jump away from both hourly neighbours in the same direction"),
     STUCK: ("stuck", "identical value repeated longer than plausible (frozen sensor)"),
-    INCONSISTENT: ("inconsistent", "cross-variable check failed, e.g. dew point above temperature"),
+    INCONSISTENT: ("inconsistent", ("disagrees with another report of the station: dew point above temperature, "
+                                    "or a 24 h gauge total unlike the sum of the same hours' amounts")),
     VERTICAL: ("vertical", "radiosonde layer thickness disagrees with the hypsometric thickness"),
 }
 

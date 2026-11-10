@@ -118,8 +118,8 @@ PRECIP = Var("tp", "accumulated precipitation", "mm", "surface", grib=("tp", "ap
              standard_names=("precipitation_amount", "lwe_thickness_of_precipitation_amount"),
              aliases=("tp", "apcp", "APCP", "APCP_surface", "total_precipitation", "precip_acc"), lo=0, hi=2000)
 GRIDDED = ("tp",)
-# 24 h totals reported by station gauges (GHCNh precipitation_24_hour), matched to each run's total over the same
-# 24 h (mverify.match): never read from a file, so no file names
+# 24 h totals of station gauges (GHCNh: the totals stations report and totals built from hourly amounts),
+# matched to each run's total over the same 24 h (mverify.match): never read from a file, so no file names
 GAUGE = Var("pr24", "24 h precipitation at gauges", "mm", "surface", lo=0, hi=1000)
 
 UPPER = [
