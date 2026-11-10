@@ -130,14 +130,16 @@ def gauge_totals(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
     gives every hour's amount. A total needs all 24 of its hours, so a station that reports no hourly
     amounts gets none, and neither does the first day of a station-year file.
     """
-    if "precipitation" not in raw or raw.empty:
+    if "precipitation" not in raw:
+        return pd.DataFrame(columns=ROWS)
+    ptype = raw["precipitation_Report_Type"].astype("string")
+    amount = pd.to_numeric(raw["precipitation"], errors="coerce")
+    if not (amount.notna() & ptype.isin((*METAR, *HOURLY_FEED))).any():  # most of the world: nothing to build from
         return pd.DataFrame(columns=ROWS)
     t = pd.to_datetime(raw["DATE"], utc=False)
     hour = t.dt.round("h")
     dt_min = ((t - hour).dt.total_seconds() / 60).round().astype(int)
     near = dt_min.abs() <= 15
-    ptype = raw["precipitation_Report_Type"].astype("string")
-    amount = pd.to_numeric(raw["precipitation"], errors="coerce")
     bad = pd.Series(_flag_bad(raw["precipitation_Quality_Code"]), raw.index)
     metar = raw.filter(regex="_Report_Type$").astype("string").isin(METAR).any(axis=1) & near
     usual = t[metar].dt.minute.mode()
