@@ -103,7 +103,7 @@ def cmd_db(a) -> int:
         elif a.db_cmd == "ghcnh":
             from mverify.ingest import ghcnh
             n = ghcnh.ingest(s, a.year, bbox=_bbox(a.bbox), ids=a.id, max_stations=a.max_stations,
-                             workers=a.workers, since=a.since, until=a.until)
+                             workers=a.workers, since=a.since, until=a.until, failed_totals=a.failed_totals)
             print(f"{n} rows written")
         elif a.db_cmd == "soundings":
             from mverify.ingest import soundings
@@ -182,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--max-stations", type=int)
     g.add_argument("--since", help="only observations at or after this time (station-years are read whole)")
     g.add_argument("--until", help="only observations at or before this time")
+    g.add_argument("--failed-totals", type=Path, metavar="DIR",
+                   help="write the 24 h gauge totals the checks failed, of the whole of each station-year "
+                        "read, to DIR/failed_totals_<year>.parquet")
     g.add_argument("--workers", type=int, default=8)
     r = dsub.add_parser("soundings", help="ingest radiosonde mandatory levels from the scorvec.com mirror")
     r.add_argument("--root", default=None, help="mirror URL or local checkout of the skewt-data branch")

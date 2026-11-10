@@ -41,6 +41,7 @@ mverify inspect FILES...                  what was recognised: variables, inits,
 mverify score [NAME=]FILES... [options]   verify; --out scorecard JSON, --pairs matched pairs (Parquet)
 mverify db status                         rows, stations and time span per variable, QC flag rates
 mverify db ghcnh --year 2026 --bbox conus build or update surface observations (--since/--until: only that window)
+                                          --failed-totals DIR: list the 24 h gauge totals the checks failed
 mverify db soundings                      build or update radiosonde levels (recent, scorvec.com mirror)
 mverify db igra --since 2026-01-01        radiosondes from IGRA2 (NCEI); --archive por for the whole record
 mverify db sensors FILE.csv               load thermometer / anemometer heights

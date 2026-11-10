@@ -22,12 +22,14 @@ Cleaning applied here:
 
 from __future__ import annotations
 
+import contextlib
 import io
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from mverify.db import qc
@@ -69,6 +71,7 @@ AMOUNTS = ("precipitation", *(f"precipitation_{n}_hour" for n in range(3, 24, 3)
            "precipitation_5_minute", "precipitation_15_minute")
 SEEN_HOURS = 18  # hours of a total's 24 with a weather report before the reports can call it dry
 WET_HOURS = 27  # a total is checked against the reports of this many hours to its end
+FAILED = pa.schema([("station_id", pa.string()), ("valid_time", pa.timestamp("us")), ("qc", pa.uint16())])
 
 
 def station_url(ghcn_id: str, year: int) -> str:
@@ -296,12 +299,17 @@ def select(sl: pd.DataFrame, n: int, cell_deg: float = 2.0) -> pd.DataFrame:
 
 def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None = None,
            max_stations: int | None = None, cache_dir: Path | None = None, workers: int = 8, progress=print,
-           since=None, until=None) -> int:
+           since=None, until=None, failed_totals: Path | None = None) -> int:
     """Fetch, clean and write GHCNh station-years; unchanged upstream files are skipped. Returns rows written.
 
     ``since`` / ``until`` keep only the observations in that window. Each station-year is still read and
     quality-controlled whole, so the spike and stuck-sensor checks see the hours either side of it, but
     only the window is stored: every station for a few weeks takes a small part of the disk of a year.
+
+    ``failed_totals`` (a directory) takes ``failed_totals_<year>.parquet``: the 24 h gauge totals that the
+    checks failed in the station-years read, over the whole year whatever the window (station_id,
+    valid_time, qc). Pairs kept from an earlier window may hold totals that a later failure of their
+    station makes suspect; the file names them.
     """
     cache_dir = cache_dir or db_path().parent / "cache"
     sl = station_list(cache_dir)
@@ -328,7 +336,7 @@ def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None =
             versions = {g: v and v + tag for g, v in zip(ids_, etags)}
         todo = [g for g in ids_ if versions[g] and store.ingested_version(SOURCE, f"{g}/{year}") != versions[g]]
         progress(f"ghcnh {year}: {len(todo)} of {len(ids_)} station files new or changed")
-        with ThreadPoolExecutor(workers) as ex:
+        with _failed_writer(failed_totals, year) as failed, ThreadPoolExecutor(workers) as ex:
             # Downloads run ahead of the writer by at most one chunk, which bounds memory.
             chunks = [todo[i:i + workers] for i in range(0, len(todo), workers)]
             pending = ex.map(lambda g, y=year: _fetch(g, y), chunks[0]) if chunks else iter(())
@@ -336,17 +344,30 @@ def ingest(store: ObsStore, years: list[int], bbox=None, ids: list[str] | None =
                 raws = list(pending)
                 if k + 1 < len(chunks):
                     pending = ex.map(lambda g, y=year: _fetch(g, y), chunks[k + 1])
-                total += _write_chunk(store, chunk, raws, meta, (start, end), versions, progress)
+                total += _write_chunk(store, chunk, raws, meta, (start, end), versions, progress, failed)
     return total
 
 
+def _failed_writer(root: Path | None, year: int):
+    """The year's file of failed gauge totals in ``root``, open for writing; None without a ``root``."""
+    if root is None:
+        return contextlib.nullcontext()
+    Path(root).mkdir(parents=True, exist_ok=True)
+    return pq.ParquetWriter(Path(root) / f"failed_totals_{year}.parquet", FAILED, compression="zstd")
+
+
 def _write_chunk(store: ObsStore, ids: list[str], raws: list[pd.DataFrame], meta: pd.DataFrame,
-                 span: tuple[pd.Timestamp, pd.Timestamp], versions: dict[str, str], progress) -> int:
-    """Station-years read whole, written for the hours of ``span`` (inside one year)."""
+                 span: tuple[pd.Timestamp, pd.Timestamp], versions: dict[str, str], progress,
+                 failed: pq.ParquetWriter | None = None) -> int:
+    """Station-years read whole, written for the hours of ``span`` (inside one year); their failed gauge
+    totals of any hour go to ``failed``."""
     start, end = span
     total = 0
     for gid, raw in zip(ids, raws):
         rows = qc.run_surface(parse(raw, f"GHCNH:{gid}"))
+        bad = rows[(rows["variable"] == TOTAL) & (rows["qc"] != 0)]
+        if failed is not None and len(bad):
+            failed.write_table(pa.Table.from_pandas(bad[FAILED.names], schema=FAILED, preserve_index=False))
         station = pd.DataFrame([_station_row(gid, meta.loc[gid], raw)])
         try:
             window = ([f"GHCNH:{gid}"], start, end)
