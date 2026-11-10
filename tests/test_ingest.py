@@ -237,6 +237,13 @@ def metars(start, hours, wet=(), remarks="RMK AO2", minute=51):
     return rows
 
 
+@pytest.fixture(params=["python", "pyarrow"])
+def strings(request):
+    """Each string backend in turn: Arrow's comes with its own regular-expression engine."""
+    with pd.option_context("mode.string_storage", request.param):
+        yield
+
+
 def totals(rows):
     out = ghcnh.parse(ghcnh_frame(rows), "GHCNH:X")
     return out[out["variable"] == "pr24"].set_index("valid_time")
@@ -255,7 +262,7 @@ def test_ghcnh_builds_24_hour_totals_from_the_routine_reports_of_a_station_that_
     assert set(out["source"]) == {"ghcnh:hourly"} and set(out["dt_min"]) == {-9} and not out["qc"].any()
 
 
-def test_ghcnh_an_hour_without_an_amount_is_dry_only_where_the_gauge_is_known_to_work():
+def test_ghcnh_an_hour_without_an_amount_is_dry_only_where_the_gauge_is_known_to_work(strings):
     day = pd.Timestamp("2026-10-13 12:00")
     assert day in totals(metars("2026-10-12T06:00", 30, wet={0: 0.0})).index  # a trace proves the gauge
     assert totals(metars("2026-10-12T06:00", 30)).empty  # a station that never reports an amount
