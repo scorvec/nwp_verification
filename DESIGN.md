@@ -105,10 +105,11 @@ Decisions and why:
 |---|---|---|
 | 1 `upstream` | provider's own QC (GHCNh letter codes a-z, legacy 2/3/6/7) | surface |
 | 2 `range` | physical limits from `variables` | all |
-| 4 `spike` | departs from both hourly neighbours in the same direction beyond a per-variable limit | surface |
+| 4 `spike` | departs from both hourly neighbours in the same direction beyond a per-variable limit; a large 24 h gauge total above the sum of the station's totals 12 h before and after | surface |
 | 8 `stuck` | identical value for longer than plausible | surface |
-| 16 `inconsistent` | dew point above temperature; a reported 24 h gauge total unlike the sum of the same hours' amounts | surface |
+| 16 `inconsistent` | dew point above temperature; a reported 24 h gauge total unlike the sum of the same hours' amounts, or a large one through hours the station's weather reports show as dry | surface |
 | 32 `vertical` | layer thickness disagrees with the hypsometric thickness; isolates the bad level | radiosonde |
+| 64 `suspect` | 24 h gauge total of a station with a large total that failed the range, spike or consistency check in the same station-year | surface |
 
 Station positions are part of QC: radiosonde stations are checked against an independent list
 (the GHCNh station list's WMO indexes) and left out when the two disagree by more than 1°.
@@ -342,6 +343,22 @@ same cells.
   and none differed. Limits: a station-year file starts on 1 January, so the year's first days
   have no totals until the station's first amount proves the gauge; a gauge that misses snow and
   has no weather sensor to say so reads dry.
+  Reported totals carry three kinds of false value that the provider's flags let through: codes
+  for a missing amount read as hundreds of millimetres, another element or a shorter period's
+  amount in the place of the 24 h one, and columns that hold the rain since a fixed hour. Three
+  checks on totals of 25 mm or more catch them without the forecast taking part. A total above
+  400 mm fails the range check. A total must show in the station's totals 12 h before and 12 h
+  after, whose 36 hours contain its 24: one above their sum by more than the larger of 1 mm and
+  10 % is a `spike`, unless one of the two stands below both of its own hourly neighbours, and
+  then that one is (a 6 h amount among running totals). A total through 24 hours in which the
+  station's METARs show no precipitation is `inconsistent`: at least 18 of the hours need a report
+  that can show the weather, no report of the 27 hours to the end may show precipitation or carry
+  an amount for a shorter period, and the station must have reported precipitation in the 30 days
+  before. A value alone cannot tell the false totals of such a station from its true ones, so
+  every total of the station-year is then `suspect`. In 151 station-years of 2026 picked for
+  their extreme totals the checks cut 29 stations and 7,287 of 30,770 large totals. Limits: a
+  true total above 400 mm is cut with its station's year; a station is judged on the year to
+  date, so its totals stored before the first failure stay clean in a store that is not rebuilt.
   Gauges check the gridded scores at points; in the US they are not independent of
   Stage IV, whose analyses take in ASOS gauges, while elsewhere they are the only daily truth.
 * **Latency, and why there are two global products.** Stage IV is final within about a day.

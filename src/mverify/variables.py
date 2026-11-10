@@ -120,7 +120,7 @@ PRECIP = Var("tp", "accumulated precipitation", "mm", "surface", grib=("tp", "ap
 GRIDDED = ("tp",)
 # 24 h totals of station gauges (GHCNh: the totals stations report and totals built from hourly amounts),
 # matched to each run's total over the same 24 h (mverify.match): never read from a file, so no file names
-GAUGE = Var("pr24", "24 h precipitation at gauges", "mm", "surface", lo=0, hi=1000)
+GAUGE = Var("pr24", "24 h precipitation at gauges", "mm", "surface", lo=0, hi=400)
 
 UPPER = [
     *(_upper("z", lv, "geopotential height", "m", ("gh", "z", "hgt"),

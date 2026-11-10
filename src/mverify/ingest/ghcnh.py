@@ -14,8 +14,10 @@ Cleaning applied here:
   * wind is stored as u10/v10 (calm = 0, 0) and as ws10
   * gauge totals (``pr24``): the 24 h totals stations report, joined by totals built from hourly amounts
     where a station gives them (``gauge_totals``); a reported total that disagrees with the built one for
-    the same hours is flagged ``qc.INCONSISTENT``
-  * mverify.db.qc surface checks (range, spike, stuck sensor, dew point > temperature)
+    the same hours is flagged ``qc.INCONSISTENT``, and so is a large total through hours the station's own
+    weather reports show as dry (``dry_weather``)
+  * mverify.db.qc surface checks (range, spike, stuck sensor, dew point > temperature, and the gauge
+    totals of a station with a large total that failed)
 """
 
 from __future__ import annotations
@@ -58,6 +60,15 @@ GAUGE_OUT = r"\bPNO\b"  # METAR remark: precipitation amount not available
 FROM_REMARKS = r"(?s)\sRMK\b.*"  # cut off to leave the body of a METAR
 # rain, drizzle, snow or ice falling at the station in the body of a METAR (not in the vicinity, not blowing)
 FALLING = r"\d{6}Z\s(?:\S+\s)*?[-+]?(?:TS|SH|FZ)*(?:DZ|RA|SN|SG|PL|GR|GS|UP)+(?:\s|$)"
+# any sign of precipitation in the body of a METAR: falling, in the vicinity, recent, a shower, a thunderstorm
+WET = r"\d{6}Z\s(?:\S+\s)*?(?:[-+]|VC|RE)?(?:TS|SH|FZ)*(?:DZ|RA|SN|SG|PL|GR|GS|UP|TS|SH)+(?:\s|$)"
+REPORT_TIME = r"\d{6}Z\s"  # the day and time group every METAR body carries
+NO_SENSOR = r"\d{6}Z\s(?:\S+\s)*?//(?:\s|$)"  # automatic station that cannot observe the weather
+# amounts over shorter periods than the 24 h total
+AMOUNTS = ("precipitation", *(f"precipitation_{n}_hour" for n in range(3, 24, 3)),
+           "precipitation_5_minute", "precipitation_15_minute")
+SEEN_HOURS = 18  # hours of a total's 24 with a weather report before the reports can call it dry
+WET_HOURS = 27  # a total is checked against the reports of this many hours to its end
 
 
 def station_url(ghcn_id: str, year: int) -> str:
@@ -116,7 +127,7 @@ def parse(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
     df["_abs"] = df["dt_min"].abs()
     df = (df.sort_values(["variable", "valid_time", "qc", "_abs", "_prio"])
             .drop_duplicates(["variable", "valid_time"], keep="first"))
-    return _merge_totals(df.drop(columns=["_abs", "_prio"]), gauge_totals(raw, station_id))
+    return _flag_dry(_merge_totals(df.drop(columns=["_abs", "_prio"]), gauge_totals(raw, station_id)), raw)
 
 
 def gauge_totals(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
@@ -190,6 +201,53 @@ def _merge_totals(df: pd.DataFrame, built: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([df, built[~built["valid_time"].isin(held)]], ignore_index=True)
 
 
+def dry_weather(raw: pd.DataFrame, ends: pd.DatetimeIndex) -> np.ndarray:
+    """Which of the 24 h totals ending at ``ends`` the station's own reports show as dry.
+
+    A total passed in dry weather when at least ``SEEN_HOURS`` of its hours have a METAR that can show the
+    weather (not the ``//`` of a station without a sensor), no report of the ``WET_HOURS`` to its end shows
+    precipitation or carries an amount above zero for a shorter period, and the station did report
+    precipitation in the ``PROOF_DAYS`` before, so its reports are known to show it.
+    """
+    hour = pd.to_datetime(raw["DATE"], utc=False).dt.round("h")
+    index = pd.date_range(hour.min(), hour.max(), freq="h")
+    remark = raw["REM"].astype("string")
+
+    def before(times, hours):  # the reports of the ``hours`` to any of ``times``
+        mark = pd.Series(0.0, index)
+        mark.loc[times] = 1.0
+        return hour.map(mark[::-1].rolling(hours, min_periods=1).max()[::-1]).to_numpy(bool)
+
+    def count(flag, rows, hours):  # at each of ``ends``: how many of the last ``hours`` have a flagged report
+        hit = flag.groupby(hour[rows]).any().reindex(index, fill_value=False).astype(float)
+        return hit.rolling(hours, min_periods=1).sum().reindex(ends).to_numpy()
+
+    rows = before(ends, WET_HOURS)
+    body = remark[rows].str.replace(FROM_REMARKS, " ", regex=True)
+    sees = body.str.contains(REPORT_TIME, na=False) & ~body.str.contains(NO_SENSOR, na=False)
+    wet = body.str.contains(WET, na=False)
+    for col in AMOUNTS:
+        if col in raw:
+            wet |= pd.to_numeric(raw.loc[rows, col], errors="coerce") > 0
+    dry = (count(sees, rows, 24) >= SEEN_HOURS) & (count(wet, rows, WET_HOURS) == 0)
+    if dry.any():  # only now the month before: has the station ever shown precipitation?
+        rows = before(ends[dry], 24 * PROOF_DAYS)
+        proof = remark[rows].str.replace(FROM_REMARKS, " ", regex=True).str.contains(WET, na=False)
+        dry &= count(proof, rows, 24 * PROOF_DAYS) > 0
+    return dry
+
+
+def _flag_dry(df: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
+    """Flag the large 24 h totals that ``dry_weather`` contradicts."""
+    large = ((df["variable"] == TOTAL) & (df["value"] >= qc.LARGE_TOTAL)).to_numpy()
+    if "REM" not in raw or not large.any():
+        return df
+    flags = df["qc"].to_numpy().copy()
+    flags[large] |= np.where(dry_weather(raw, pd.DatetimeIndex(df.loc[large, "valid_time"])),
+                             qc.INCONSISTENT, 0).astype("uint16")
+    return df.assign(qc=flags)
+
+
 MISSING = -999.9
 
 
@@ -211,7 +269,7 @@ def _station_row(ghcn_id: str, meta: pd.Series, raw: pd.DataFrame | None) -> dic
             "country": meta.get("ISO_CODE")}
 
 
-COLUMNS = ["DATE", "LATITUDE", "LONGITUDE", "ELEVATION", "REM"] + [
+COLUMNS = ["DATE", "LATITUDE", "LONGITUDE", "ELEVATION", "REM", *AMOUNTS[1:]] + [
     f"{c}{suffix}" for c in (*FIELDS, "wind_speed", "wind_direction", "precipitation")
     for suffix in ("", "_Quality_Code", "_Report_Type")]
 

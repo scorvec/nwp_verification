@@ -306,6 +306,48 @@ def test_ghcnh_reported_total_stands_and_is_flagged_where_the_built_total_disagr
     assert (replaced["value"], replaced["qc"], replaced["source"]) == (12.7, 0, "ghcnh:hourly")
 
 
+def test_ghcnh_a_large_total_through_hours_the_reports_show_as_dry_is_flagged(strings):
+    day = pd.Timestamp("2026-10-13 12:00")
+
+    def reports(rain_at=5):  # hourly from the 8th to the hour of the total, rain in one of them
+        rows = metars("2026-10-08T00:00", 24 * 5 + 13)
+        if rain_at is not None:
+            at = pd.Timestamp(rows[rain_at]["DATE"])
+            rows[rain_at]["REM"] = f"KXXX {at:%d%H%M}Z 27005KT 3SM -RA OVC010 10/09 A3000 RMK AO2"
+        return rows
+
+    def flag(rows, value=60.0, **amount):
+        total = {"DATE": day.isoformat(), "precipitation_24_hour": value,
+                 "precipitation_24_hour_Report_Type": "FM12", **amount}
+        return totals([*rows, total]).loc[day, "qc"]
+
+    assert flag(reports()) == qc.INCONSISTENT  # rain five days before: the reports are known to show it
+    assert flag(reports(), value=20.0) == 0  # not a large total
+    assert flag(reports(rain_at=120)) == 0  # rain in the hours of the total
+    assert flag(reports(), precipitation_6_hour=4.0) == 0  # an amount for part of the day
+    assert flag(reports(rain_at=None)) == 0  # a station whose reports never show precipitation
+    assert flag(reports()[:108] + reports()[116:]) == 0  # reports for 16 of the 24 hours
+    blind = reports()
+    for row in blind[100:]:
+        row["REM"] = row["REM"].replace("10SM", "10SM //")  # an automatic station without a weather sensor
+    assert flag(blind) == 0
+
+
+def test_ghcnh_a_failed_large_total_outside_the_window_keeps_the_station_out(monkeypatch, store, tmp_path):
+    sl = pd.DataFrame({"GHCN_ID": ["X1"], "NAME": ["x"], "LATITUDE": [40.0], "LONGITUDE": [-100.0],
+                       "ELEVATION": [500.0], "WMO_ID": [None], "ICAO": [None], "ISO_CODE": ["US"]})
+    monkeypatch.setattr(ghcnh, "station_list", lambda cache_dir: sl)
+    for first, kept in ((500.0, []), (5.0, [3.0])):  # above the range of the variable, then a sound total
+        raw = ghcnh_frame([{"DATE": f"2026-10-{d:02d}T12:00:00", "precipitation_24_hour": v}
+                           for d, v in ((2, first), (5, 3.0))])
+        monkeypatch.setattr(ghcnh, "_fetch", lambda g, y, raw=raw: raw)
+        monkeypatch.setattr(ghcnh.http, "etag", lambda url, first=first: f"e{first}")
+        ghcnh.ingest(store, [2026], since="2026-10-04", until="2026-10-06", cache_dir=tmp_path,
+                     progress=lambda m: None)
+        obs = store.fetch_obs(["pr24"], pd.Timestamp("2026-10-01"), pd.Timestamp("2026-10-31"))
+        assert obs["value"].tolist() == kept
+
+
 def test_ghcnh_built_totals_reach_the_store_for_the_window(monkeypatch, store, tmp_path):
     sl = pd.DataFrame({"GHCN_ID": ["X1"], "NAME": ["x"], "LATITUDE": [40.0], "LONGITUDE": [-100.0],
                        "ELEVATION": [500.0], "WMO_ID": [None], "ICAO": ["KXXX"], "ISO_CODE": ["US"]})

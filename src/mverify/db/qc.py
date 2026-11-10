@@ -19,22 +19,31 @@ SPIKE = 4
 STUCK = 8
 INCONSISTENT = 16
 VERTICAL = 32
+SUSPECT = 64
 
 # bit -> (name, description); written to the qc_flags table so the database documents itself.
 FLAGS = {
     UPSTREAM: ("upstream", "the data provider's own quality control flagged the value"),
     RANGE: ("range", "outside the physical limits of the variable (variables.lo / variables.hi)"),
-    SPIKE: ("spike", "isolated jump away from both hourly neighbours in the same direction"),
+    SPIKE: ("spike", ("isolated jump away from both hourly neighbours in the same direction, or a large 24 h "
+                      "gauge total above the sum of the station's totals 12 h before and after")),
     STUCK: ("stuck", "identical value repeated longer than plausible (frozen sensor)"),
     INCONSISTENT: ("inconsistent", ("disagrees with another report of the station: dew point above temperature, "
-                                    "or a 24 h gauge total unlike the sum of the same hours' amounts")),
+                                    "a 24 h gauge total unlike the sum of the same hours' amounts, or a large "
+                                    "one through hours the station's weather reports show as dry")),
     VERTICAL: ("vertical", "radiosonde layer thickness disagrees with the hypsometric thickness"),
+    SUSPECT: ("suspect", ("24 h gauge total of a station with a large total that failed the range, spike or "
+                          "consistency check in the same station-year")),
 }
 
 # Largest plausible one-hour departure of a value from both of its neighbours.
 SPIKE_LIMIT = {"t2m": 8.0, "td2m": 10.0, "msl": 6.0, "sp": 6.0, "u10": 25.0, "v10": 25.0, "ws10": 25.0}
 # Hours a value may repeat exactly before the sensor is presumed stuck.
 STUCK_HOURS = {"t2m": 12, "td2m": 18, "msl": 12, "sp": 12}
+# Gauge totals from this many mm up are checked against the station's other reports.
+LARGE_TOTAL = 25.0
+# A large total may exceed the totals either side of it by the larger of these (mm, share of the total).
+TOTAL_SLACK_MM, TOTAL_SLACK_FRAC = 1.0, 0.10
 
 
 def range_check(df: pd.DataFrame) -> pd.Series:
@@ -59,6 +68,39 @@ def spike_check(df: pd.DataFrame) -> pd.Series:
         d1, d2 = sub["value"] - prev_v, sub["value"] - next_v
         bad = hourly & (d1.abs() > lim) & (d2.abs() > lim) & (np.sign(d1) == np.sign(d2))
         out.loc[sub.index[bad.to_numpy()]] = SPIKE
+    return out
+
+
+def total_spike_check(df: pd.DataFrame) -> pd.Series:
+    """A large 24 h gauge total above the sum of the station's totals 12 h before and 12 h after.
+
+    The 24 hours of a total lie inside the 36 hours those two cover, so rain it holds must show in one of
+    them: where it does not, one of the three is false. That is the total itself, unless a neighbour stands
+    below both of its own hourly neighbours (a shorter period's amount in the place of a 24 h one), and then
+    the neighbour is flagged. Needs both neighbours, and only totals that arrive unflagged take part.
+    """
+    out = pd.Series(0, index=df.index, dtype="uint16")
+    sub = df[(df["variable"] == V.GAUGE.name) & (df["qc"] == 0)].drop_duplicates(["station_id", "valid_time"])
+    if sub.empty:
+        return out
+
+    def shifted(hours):
+        return pd.MultiIndex.from_arrays([sub["station_id"], sub["valid_time"] + pd.Timedelta(hours=hours)])
+
+    def slack(total):
+        return np.maximum(TOTAL_SLACK_MM, TOTAL_SLACK_FRAC * total)
+
+    held = pd.Series(sub["value"].to_numpy(), shifted(0))
+    value = held.to_numpy()
+    around = {hours: held.reindex(shifted(hours)).to_numpy() for hours in (-12, -1, 1, 12)}  # NaN where none
+    above = (value >= LARGE_TOTAL) & (value > around[-12] + around[12] + slack(value))
+    floor = np.minimum(around[-1], around[1])
+    low = pd.Series(value < floor - slack(floor), held.index)
+    blamed = {hours: above & low.reindex(shifted(hours), fill_value=False).to_numpy() for hours in (-12, 12)}
+    bad = above & ~blamed[-12] & ~blamed[12]
+    for hours, rows in blamed.items():
+        bad |= held.index.isin(shifted(hours)[rows])
+    out.loc[sub.index[bad]] = SPIKE
     return out
 
 
@@ -91,11 +133,26 @@ def dewpoint_check(df: pd.DataFrame) -> pd.Series:
     return out
 
 
+def suspect_check(df: pd.DataFrame, flags: pd.Series) -> pd.Series:
+    """Every gauge total of a station with a large total that ``flags`` fails on range, spike or consistency.
+
+    A gauge or a report coding that produced one false large total cannot be told from the true ones by the
+    value, so the station's other totals in ``df`` go with it.
+    """
+    gauge = df["variable"] == V.GAUGE.name
+    failed = gauge & (df["value"] >= LARGE_TOTAL) & ((flags & (RANGE | SPIKE | INCONSISTENT)) != 0)
+    return (gauge & df["station_id"].isin(df.loc[failed, "station_id"].unique())).astype("uint16") * SUSPECT
+
+
 def run_surface(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply every surface check; ``df`` has station_id, valid_time, variable, value, qc."""
+    """Apply every surface check; ``df`` has station_id, valid_time, variable, value, qc.
+
+    The suspect-station check judges a station on the rows of ``df``: pass each station's whole record.
+    """
     df = df.copy()
-    df["qc"] = (df["qc"].astype("uint16") | range_check(df) | spike_check(df) | stuck_check(df)
-                | dewpoint_check(df)).astype("uint16")
+    flags = (df["qc"].astype("uint16") | range_check(df) | spike_check(df) | total_spike_check(df)
+             | stuck_check(df) | dewpoint_check(df))
+    df["qc"] = (flags | suspect_check(df, flags)).astype("uint16")
     return df
 
 
