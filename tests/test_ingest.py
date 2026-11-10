@@ -348,6 +348,24 @@ def test_ghcnh_a_failed_large_total_outside_the_window_keeps_the_station_out(mon
         assert obs["value"].tolist() == kept
 
 
+def test_ghcnh_the_failed_totals_of_the_whole_year_are_listed(monkeypatch, store, tmp_path):
+    sl = pd.DataFrame({"GHCN_ID": ["X1", "X2"], "NAME": ["x", "y"], "LATITUDE": [40.0, 41.0],
+                       "LONGITUDE": [-100.0, -101.0], "ELEVATION": [500.0, 600.0], "WMO_ID": [None, None],
+                       "ICAO": [None, None], "ISO_CODE": ["US", "US"]})
+    raws = {g: ghcnh_frame([{"DATE": f"2026-10-{d:02d}T12:00:00", "precipitation_24_hour": v}
+                            for d, v in ((2, first), (5, 3.0))]) for g, first in (("X1", 500.0), ("X2", 5.0))}
+    monkeypatch.setattr(ghcnh, "station_list", lambda cache_dir: sl)
+    monkeypatch.setattr(ghcnh, "_fetch", lambda g, y: raws[g])
+    monkeypatch.setattr(ghcnh.http, "etag", lambda url: "e1")
+    ghcnh.ingest(store, [2026], since="2026-10-04", until="2026-10-06", cache_dir=tmp_path,
+                 progress=lambda m: None, failed_totals=tmp_path / "failed")
+    failed = pd.read_parquet(tmp_path / "failed" / "gauge_failed_2026.parquet")
+    # the total above the range fell before the window: it and the station's sound total are both listed
+    assert failed["station_id"].tolist() == ["GHCNH:X1"] * 2
+    assert dict(zip(failed["valid_time"], failed["qc"])) == {
+        pd.Timestamp("2026-10-02 12:00"): qc.RANGE | qc.SUSPECT, pd.Timestamp("2026-10-05 12:00"): qc.SUSPECT}
+
+
 def test_ghcnh_built_totals_reach_the_store_for_the_window(monkeypatch, store, tmp_path):
     sl = pd.DataFrame({"GHCN_ID": ["X1"], "NAME": ["x"], "LATITUDE": [40.0], "LONGITUDE": [-100.0],
                        "ELEVATION": [500.0], "WMO_ID": [None], "ICAO": ["KXXX"], "ISO_CODE": ["US"]})

@@ -359,6 +359,9 @@ same cells.
   their extreme totals the checks cut 29 stations and 7,287 of 30,770 large totals. Limits: a
   true total above 400 mm is cut with its station's year; a station is judged on the year to
   date, so its totals stored before the first failure stay clean in a store that is not rebuilt.
+  Scores kept from pairs made before a failure hold such totals too: `mverify db ghcnh
+  --failed-totals DIR` lists every failed total of the station-years it reads, over the whole
+  year whatever the window, so that they can be taken out of those pairs.
   Gauges check the gridded scores at points; in the US they are not independent of
   Stage IV, whose analyses take in ASOS gauges, while elsewhere they are the only daily truth.
 * **Latency, and why there are two global products.** Stage IV is final within about a day.
