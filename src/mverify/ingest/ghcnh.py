@@ -55,8 +55,9 @@ PROOF_DAYS = 30  # an hour without an amount is dry only if the station reported
 AGREE_MM, AGREE_FRAC = 1.0, 0.10  # reported and built totals agree within the larger of the two
 REMARKS = r"\sRMK\s"  # the part of a METAR that holds the hour's amount; some copies come without it
 GAUGE_OUT = r"\bPNO\b"  # METAR remark: precipitation amount not available
+FROM_REMARKS = r"(?s)\sRMK\b.*"  # cut off to leave the body of a METAR
 # rain, drizzle, snow or ice falling at the station in the body of a METAR (not in the vicinity, not blowing)
-FALLING = r"\d{6}Z\s(?:(?!RMK\b)\S+\s)*?[-+]?(?:TS|SH|FZ)*(?:DZ|RA|SN|SG|PL|GR|GS|UP)+(?:\s|$)"
+FALLING = r"\d{6}Z\s(?:\S+\s)*?[-+]?(?:TS|SH|FZ)*(?:DZ|RA|SN|SG|PL|GR|GS|UP)+(?:\s|$)"
 
 
 def station_url(ghcn_id: str, year: int) -> str:
@@ -146,12 +147,13 @@ def gauge_totals(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
     routine = metar & (t.dt.minute == (usual.iloc[0] if len(usual) else -1))
     own = routine & ptype.isin(METAR)
     remark = raw.get("REM", pd.Series(pd.NA, raw.index)).astype("string")
+    body = remark.str.replace(FROM_REMARKS, " ", regex=True)
     rows = pd.DataFrame({
         "hour": hour, "dt_min": dt_min, "routine": routine,
         "own": amount.where(own & ~bad), "feed": amount.where(ptype.isin(HOURLY_FEED) & near & ~bad),
         "full": routine & remark.str.contains(REMARKS, na=False),
         "out": routine & ((own & bad) | remark.str.contains(GAUGE_OUT, na=False)),
-        "falling": routine & remark.str.contains(FALLING, na=False),
+        "falling": routine & body.str.contains(FALLING, na=False),
     })
     rows = rows[rows["routine"] | rows["feed"].notna()]
     if rows.empty:
