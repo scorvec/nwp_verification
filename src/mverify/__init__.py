@@ -1,6 +1,6 @@
 """mverify: verify model output of any format against a database of cleaned observations."""
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"  # the only place the version is set (pyproject.toml reads it)
 
 
 def __getattr__(name):  # keep `import mverify` light; load the heavy modules on first use

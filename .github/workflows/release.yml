@@ -1,0 +1,73 @@
+name: release
+
+# Builds the sdist and wheel on every change to the package and checks them: twine's strict metadata check, the
+# summary length PyPI caps and twine does not check, and the installed wheel's command in a clean environment. A
+# published GitHub release (tag vX.Y.Z = mverify.__version__) also uploads them to PyPI by Trusted Publishing - no
+# token is stored; PyPI lists this repository, this workflow and the "pypi" environment as the project's trusted
+# publisher.
+on:
+  push:
+    paths: ["src/**", "pyproject.toml", "README.md", "LICENSE", ".github/workflows/release.yml"]
+  pull_request:
+    paths: ["src/**", "pyproject.toml", "README.md", "LICENSE", ".github/workflows/release.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and check the distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+      - name: Check the metadata (PyPI rendering of the README included)
+        run: |
+          twine check --strict dist/*
+          python -c "import tomllib; s = tomllib.load(open('pyproject.toml', 'rb'))['project']['description']; assert len(s) <= 512, f'summary is {len(s)} characters; PyPI takes 512'"
+      - name: Install the wheel in a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          "$RUNNER_TEMP/wheel-env/bin/pip" install dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-env/bin/mverify" --version
+          "$RUNNER_TEMP/wheel-env/bin/python" -c "from mverify.verify import verify; from mverify.db.store import ObsStore"
+      - name: The release tag matches the package version
+        if: github.event_name == 'release'
+        run: |
+          v=$("$RUNNER_TEMP/wheel-env/bin/python" -c "import mverify; print(mverify.__version__)")
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "::error::release tag $GITHUB_REF_NAME does not match the package version $v"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mverify/
+    permissions:
+      id-token: write  # the OIDC token Trusted Publishing exchanges for a short-lived upload token
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
