@@ -10,6 +10,17 @@ def ghcnh_frame(rows):
     return pd.DataFrame([{c: r.get(c, np.nan) for c in ghcnh.COLUMNS} for r in rows])
 
 
+def test_ghcnh_drops_a_report_without_its_time():
+    raw = ghcnh_frame([
+        {"DATE": "2026-10-13T12:00:00", "temperature": 11.0, "temperature_Report_Type": "FM15",
+         "precipitation": 1.0, "precipitation_Report_Type": "FM15"},
+        {"DATE": None, "temperature": 12.0, "temperature_Report_Type": "FM15",
+         "precipitation": 1.0, "precipitation_Report_Type": "FM15"},
+    ])
+    out = ghcnh.parse(raw, "GHCNH:X")
+    assert out[out["variable"] == "t2m"]["value"].tolist() == [11.0]
+
+
 def test_ghcnh_picks_the_report_nearest_the_hour_and_prefers_metar_on_ties():
     raw = ghcnh_frame([
         {"DATE": "2026-10-13T11:51:00", "temperature": 10.0, "temperature_Report_Type": "FM15"},

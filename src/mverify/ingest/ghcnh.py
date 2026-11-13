@@ -94,6 +94,8 @@ def _flag_bad(code: pd.Series) -> np.ndarray:
 def parse(raw: pd.DataFrame, station_id: str) -> pd.DataFrame:
     """One GHCNh station-year frame -> long canonical rows (before mverify QC)."""
     t = pd.to_datetime(raw["DATE"], utc=False)
+    if t.isna().any():  # a report without its time cannot be placed in an hour
+        raw, t = raw[t.notna()], t[t.notna()]
     hour = t.dt.round("h")
     dt_min = ((t - hour).dt.total_seconds() / 60).round().astype(int)
     keep = dt_min.abs() <= 30
