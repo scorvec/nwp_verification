@@ -1,67 +1,74 @@
 # mverify
 
-Verify weather model output against real observations, without downloading or cleaning any
-observations yourself.
+Verify weather model output against quality-controlled observations. Point it at forecast files (GRIB, netCDF
+or Zarr): it recognises the variables, units, times, grid and ensemble members, interpolates each field to the
+stations that observed at its valid time, and scores it.
 
-```
+**Status: prototype.** Architecture and plan: [DESIGN.md](DESIGN.md).
+
+## Install
+
+```bash
 pip install "mverify[all] @ git+https://github.com/scorvec/nwp_verification"
+```
+
+## Use
+
+```bash
+# 1. Build the observation database once (default $MVERIFY_DB, else ~/.cache/mverify/obs.duckdb)
+mverify db ghcnh --year 2026 --bbox conus      # surface stations (GHCNh)
+mverify db soundings                           # recent radiosondes
+mverify db precip --start 2026-10-01           # Stage IV and GPCP analyses (GPCP needs EARTHDATA_USERNAME/PASSWORD)
+
+# 2. Check what was recognised in the files, then score
+mverify inspect "gfs/*.grib2"
 mverify score GFS="gfs/*.grib2" AIFS=aifs.zarr --region conus --out scores.json
 ```
 
-mverify reads GRIB, netCDF and Zarr by content, recognises the variables, units, times, grid and
-ensemble members on its own, interpolates every field to the stations that observed at its valid
-time, and scores it. The observations come from a database of quality-controlled surface
-stations (GHCNh) and radiosondes that is built and kept current centrally.
+`web/scorecard.html` draws a `scores.json` placed next to it. From Python:
 
-Source: [scorvec/nwp_verification](https://github.com/scorvec/nwp_verification). The Python package and command are named `mverify`.
+```python
+from mverify.verify import verify
 
-**Status: prototype.** See [DESIGN.md](DESIGN.md) for the architecture and the plan.
+result = verify({"GFS": ["gfs/*.grib2"]}, regions=["conus"])
+result.table          # one row per model x network x variable x region x lead
+result.scorecard()    # the JSON that --out writes
+```
 
-## What it scores today
+## What it scores
 
-| truth | variables | scores |
+| Truth | Variables | Scores |
 |---|---|---|
-| surface stations (GHCNh) | 2 m temperature and dew point, surface (station-level) pressure, sea-level pressure, 10 m wind (u, v, speed, vector), 24 h precipitation at gauges | bias, MAE, RMSE, error SD, correlation; for wind speed the distribution too: QQ quantiles, a hybrid Weibull fit and exceedance frequencies, against the observed (`distribution.py`) |
-| radiosondes | height, temperature and wind at 1000-100 hPa, specific humidity at 1000-300 hPa | same, plus vector wind RMSE |
-| ensembles | any of the above (a dew point derived from 2 m relative humidity where a model publishes only that) | fair CRPS, ensemble-mean RMSE, spread, spread/skill; paired CRPS tests between ensembles (`significance.ensemble_tests`); `ensemble.summarise` keeps one row per case (mean, spread, CRPS, the observation's rank, event probabilities) so a database of every case need not keep every member |
-| precipitation analyses (Stage IV over CONUS, GPCP globally) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50-400 km, bias, RMSE; per-cell maps of bias and RMSE, the bias tested cell by cell (`precip/maps.py`) |
+| Surface stations (GHCNh) | 2 m temperature and dew point, station and sea-level pressure, 10 m wind, 24 h gauge precipitation | bias, MAE, RMSE, error SD, correlation; wind-speed distribution |
+| Radiosondes | height, temperature and wind at 1000–100 hPa, specific humidity at 1000–300 hPa | the same, plus vector wind RMSE |
+| Ensembles | any of the above | fair CRPS, ensemble-mean RMSE, spread, spread/skill, paired tests between ensembles |
+| Precipitation analyses (Stage IV, GPCP) | 24 h precipitation | ETS, frequency bias, POD, FAR, FSS at 50–400 km, bias and RMSE maps |
 
-Every score also has an observation-error-aware version (`rmse_oc`, `crps_oe`, `ssr_oe`). Radiosonde
-levels are matched where the balloon drifted to. Surface stations more than 100 m from the model terrain
-are left out, coastal stations are matched to land grid points when the files have a land-sea mask, and
-winds from anemometers that are not at 10 m are corrected to 10 m. Several models are compared on
-the observations they all have, and the scorecard says which differences are significant; with `--grid DEG`
-every model is first averaged onto one regular grid, so models of different resolution are compared from
-cells of the same size. See [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
+Models named together are compared on the observations they all have, and the scorecard marks which
+differences are significant. `--grid DEG` first averages every model onto one regular grid. Each score also has
+a version that allows for observation error (`rmse_oc`, `crps_oe`, `ssr_oe`). How stations and model grid points
+are made comparable: [DESIGN.md](DESIGN.md#making-observations-and-the-model-comparable).
 
 ## Commands
 
 ```
-mverify inspect FILES...                  what was recognised: variables, inits, leads, grid, members
-mverify score [NAME=]FILES... [options]   verify; --out scorecard JSON, --pairs matched pairs (Parquet)
-mverify db status                         rows, stations and time span per variable, QC flag rates
-mverify db ghcnh --year 2026 --bbox conus build or update surface observations (--since/--until: only that window)
-                                          --failed-totals DIR: list the 24 h gauge totals the checks failed
-mverify db soundings                      build or update radiosonde levels (recent, scorvec.com mirror)
-mverify db igra --since 2026-01-01        radiosondes from IGRA2 (NCEI); --archive por for the whole record
-mverify db sensors FILE.csv               load thermometer / anemometer heights
-mverify db precip --start 2026-10-01      add Stage IV and GPCP analyses (GPCP needs EARTHDATA_USERNAME/PASSWORD)
-mverify db init                           create a database, or upgrade an older one
-mverify db export DIR                     write the Parquet snapshot users query
+mverify inspect FILES...                 variables, inits, leads, grid and members recognised
+mverify score [NAME=]FILES... [options]  verify; --out scorecard JSON, --pairs matched pairs (Parquet),
+                                         --snapshot DIR_OR_URL to read a published snapshot instead of --db
+mverify db init | status                 create or upgrade a database; rows, stations, time span, QC rates
+mverify db ghcnh --year Y [--bbox B]     surface observations (--since/--until limit the window)
+mverify db soundings                     recent radiosonde levels from the scorvec.com mirror
+mverify db igra --since DATE             radiosondes from IGRA2 (--archive por for the whole record)
+mverify db precip --start DATE           precipitation analyses
+mverify db sensors FILE.csv              thermometer and anemometer heights
+mverify db export DIR                    write the Parquet snapshot
 ```
 
-From Python:
+`mverify <command> --help` lists every option.
 
-```python
-from mverify.verify import verify
-result = verify({"GFS": ["gfs/*.grib2"]}, regions=["conus"])
-result.table          # one row per model x network x variable x region x lead
-result.scorecard()    # the JSON written by --out
-```
+## Develop
 
-## Development
-
-```
+```bash
 pip install -e ".[dev]"
 pytest
 ruff check src tests
